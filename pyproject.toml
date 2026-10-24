@@ -11,6 +11,8 @@ dependencies = [
     "pydantic-settings>=2.4",
     "httpx>=0.28.1",
     "sentence-transformers>=3.0",
+    # Direct dependency so [tool.uv.sources] below can pick its index (CPU-only build).
+    "torch>=2.4",
     "qdrant-client>=1.12",
 ]
 
@@ -20,6 +22,19 @@ dev = [
     "ruff>=0.6",
     "httpx2>=2.16.0",
 ]
+
+# PyTorch's PyPI wheels for Linux bundle CUDA (several GB). Linux and Windows use the CPU-only
+# build from PyTorch's index instead; macOS keeps PyPI, whose wheels are CPU/MPS only.
+# See https://docs.astral.sh/uv/guides/integration/pytorch/
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [build-system]
 requires = ["uv_build>=0.11.32,<0.12.0"]

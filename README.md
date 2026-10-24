@@ -52,8 +52,7 @@ docker compose up --build   # API on port 8000 plus a Qdrant server on port 6333
 
 The image runs as a non-root user, contains no `.env` file, and has a built-in health check.
 Vectors persist in the `qdrant_data` volume and the downloaded model in `model_cache`.
-The image is large (several GB) because PyTorch from PyPI includes GPU libraries; see
-Limitations.
+PyTorch is the CPU-only build (see Embedding devices), which keeps the image small.
 
 ## Ingesting a repository
 
@@ -249,6 +248,17 @@ a new `REPOMIND_QDRANT_COLLECTION`; RepoMind refuses to mix sizes and says so. P
 which model produced them, so after switching models, re-run `/index` and search ignores
 vectors from the old model.
 
+### Embedding devices
+
+Embeddings run on the CPU by default (`REPOMIND_EMBEDDING_DEVICE=cpu`).
+
+- **Linux and Windows** (including the Docker image) install the CPU-only PyTorch build from
+  `https://download.pytorch.org/whl/cpu`, configured in `pyproject.toml` under
+  `[tool.uv.sources]`. It leaves out the several GB of CUDA libraries that PyTorch's PyPI
+  wheels bundle on Linux. `cuda` is not available with this build; using a GPU would need a
+  CUDA index in `pyproject.toml` and a regenerated `uv.lock`.
+- **macOS** installs PyTorch from PyPI, which is CPU/MPS only; `mps` uses Apple silicon.
+
 ### Retrieval limitations
 
 - Semantic search only; keyword (hybrid) search and reranking come in Phase 4.
@@ -259,8 +269,6 @@ vectors from the old model.
 - Indexing runs inside the request and on the CPU by default; large repositories take a while.
 - If indexing is interrupted after the new commit is stored but before old chunks are
   deleted, both versions can briefly appear in results; re-running `/index` fixes it.
-- PyTorch from PyPI on Linux includes CUDA libraries, so the virtual environment and the
-  Docker image are several GB. A CPU-only PyTorch build would make them much smaller.
 
 ## Configuration
 
