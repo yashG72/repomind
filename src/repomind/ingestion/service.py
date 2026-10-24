@@ -11,7 +11,7 @@ from collections import Counter
 from pydantic import BaseModel
 
 from repomind.core.interfaces import Chunker, RepositoryFetcher
-from repomind.core.models import CodeChunk, FetchResult, SkippedFile
+from repomind.core.models import CodeChunk, FetchResult, RepoRef, SkippedFile
 from repomind.ingestion.github_url import parse_github_repo_url
 from repomind.ingestion.secrets import redact_secrets
 
@@ -40,6 +40,7 @@ class IngestionSummary(BaseModel):
 
 
 class IngestionResult(BaseModel):
+    repo: RepoRef  # GitHub's canonical spelling of the repository
     summary: IngestionSummary
     chunks: list[CodeChunk]
 
@@ -62,7 +63,7 @@ class IngestionService:
             if count:
                 redactions += count
                 source = source.model_copy(update={"content": content})
-            chunks.extend(self._chunker.chunk(repo, fetched.commit_sha, source))
+            chunks.extend(self._chunker.chunk(fetched.repo, fetched.commit_sha, source))
 
         summary = _summarize(fetched, chunks, redactions, started)
         logger.info(
@@ -77,7 +78,7 @@ class IngestionService:
                 "duration_ms": summary.duration_ms,
             },
         )
-        return IngestionResult(summary=summary, chunks=chunks)
+        return IngestionResult(repo=fetched.repo, summary=summary, chunks=chunks)
 
 
 def _summarize(

@@ -49,20 +49,52 @@ class Chunker(Protocol):
 
 
 class Embedder(Protocol):
-    """Turns text into fixed-length vectors."""
+    """Turns text into fixed-length vectors.
+
+    Documents (code chunks) and queries (questions) are embedded separately because some
+    models expect different prefixes or instructions for each.
+    """
+
+    @property
+    def model_name(self) -> str: ...
 
     @property
     def dimension(self) -> int: ...
 
-    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]: ...
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]: ...
+
+    def embed_query(self, text: str) -> list[float]: ...
 
 
 class VectorStore(Protocol):
-    """Stores chunk vectors and finds the nearest ones to a query vector."""
+    """Stores chunk vectors and finds the nearest ones to a query vector.
 
-    def upsert(self, chunks: Sequence[CodeChunk], vectors: Sequence[Sequence[float]]) -> None: ...
+    Every read and delete is scoped to one repository, so results never mix repositories.
+    """
 
-    def search(self, repo: RepoRef, vector: Sequence[float], limit: int) -> list[ScoredChunk]: ...
+    def ensure_collection(self, dimension: int) -> None: ...
+
+    def existing_ids(self, chunk_ids: Sequence[str], embedding_model: str) -> set[str]: ...
+
+    def upsert(
+        self,
+        chunks: Sequence[CodeChunk],
+        vectors: Sequence[Sequence[float]],
+        embedding_model: str,
+    ) -> None: ...
+
+    def delete_other_commits(self, repo: RepoRef, keep_commit_sha: str) -> int: ...
+
+    def count(self, repo: RepoRef, commit_sha: str | None = None) -> int: ...
+
+    def search(
+        self,
+        repo: RepoRef,
+        vector: Sequence[float],
+        limit: int,
+        embedding_model: str,
+        commit_sha: str | None = None,
+    ) -> list[ScoredChunk]: ...
 
 
 class Reranker(Protocol):

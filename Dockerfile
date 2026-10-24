@@ -16,7 +16,8 @@ RUN uv sync --frozen --no-dev
 FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH"
 # Run as an unprivileged user, never as root.
-RUN useradd --create-home --uid 1000 repomind
+RUN useradd --create-home --uid 1000 repomind \
+    && mkdir -p /models /app/data && chown repomind:repomind /models /app/data
 WORKDIR /app
 COPY --from=builder --chown=repomind:repomind /app /app
 USER repomind
