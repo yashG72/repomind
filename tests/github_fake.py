@@ -69,12 +69,12 @@ class FakeGitHub:
             return httpx.Response(200, content=json.dumps(meta))
         if host == "api.github.com" and path == f"{base}/commits/main":
             return httpx.Response(200, text=self.sha_body)
-        if host == "api.github.com" and path == f"{base}/tarball/{SHA}":
+        if host == "api.github.com" and path == f"{base}/tarball/{self.sha_body}":
             return httpx.Response(
                 302,
                 headers={
                     "location": f"https://codeload.github.com/{self.owner}/{self.repo}"
-                    f"/legacy.tar.gz/{SHA}"
+                    f"/legacy.tar.gz/{self.sha_body}"
                 },
             )
         if host == "codeload.github.com":

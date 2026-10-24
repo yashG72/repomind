@@ -10,6 +10,8 @@ dependencies = [
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
     "httpx>=0.28.1",
+    "sentence-transformers>=3.0",
+    "qdrant-client>=1.12",
 ]
 
 [dependency-groups]
@@ -26,6 +28,13 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+filterwarnings = [
+    # Emitted when tests deliberately point qdrant-client at an unreachable server.
+    "ignore:Failed to obtain server version:UserWarning",
+]
+markers = [
+    "integration: needs a real embedding model and/or Qdrant server (see tests/integration)",
+]
 
 [tool.ruff]
 line-length = 100

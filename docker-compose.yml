@@ -1,4 +1,7 @@
-# Local development stack. Qdrant will be added here in Phase 3, when RepoMind uses it.
+# Local stack: the RepoMind API plus a Qdrant server.
+#   docker compose up --build
+# Data persists in named volumes: vectors in `qdrant_data`, the downloaded embedding model in
+# `model_cache` (so it is downloaded only once).
 services:
   api:
     build: .
@@ -7,3 +10,22 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      REPOMIND_QDRANT_URL: http://qdrant:6333
+      REPOMIND_EMBEDDING_CACHE_DIR: /models
+    volumes:
+      - model_cache:/models
+    depends_on:
+      qdrant:
+        condition: service_started
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  qdrant_data:
+  model_cache:

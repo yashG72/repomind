@@ -45,6 +45,7 @@ from repomind.ingestion.errors import (
     UnsafeRedirect,
 )
 from repomind.ingestion.file_filter import normalize_archive_path
+from repomind.ingestion.github_url import InvalidRepositoryURL, parse_github_repo_url
 
 logger = logging.getLogger(__name__)
 
@@ -82,11 +83,14 @@ class GitHubFetcher:
     def fetch(self, repo: RepoRef) -> FetchResult:
         with self._client() as client:
             meta = self._get_metadata(client, repo)
+            # GitHub's own spelling (e.g. "yashG72/repomind" for "yashg72/RepoMind"), so the
+            # same repository always gets the same identity in chunk ids and the vector store.
+            canonical = _canonical_repo(meta.full_name)
             sha = self._get_commit_sha(client, repo, meta.default_branch)
             if sha is None:
                 logger.info("repository is empty", extra={"repo": repo.full_name})
                 return FetchResult(
-                    repo=repo,
+                    repo=canonical,
                     commit_sha="",
                     default_branch=meta.default_branch,
                     files=[],
@@ -96,7 +100,7 @@ class GitHubFetcher:
                 )
             archive = self._download_archive(client, repo, sha)
 
-        result = self._read_archive(repo, sha, meta.default_branch, archive)
+        result = self._read_archive(canonical, sha, meta.default_branch, archive)
         logger.info(
             "repository fetched",
             extra={
@@ -284,6 +288,13 @@ class GitHubFetcher:
             files_discovered=discovered,
             bytes_downloaded=len(archive),
         )
+
+
+def _canonical_repo(full_name: str) -> RepoRef:
+    try:
+        return parse_github_repo_url(f"https://github.com/{full_name}")
+    except InvalidRepositoryURL as exc:
+        raise MalformedResponse("GitHub returned an invalid repository name") from exc
 
 
 def _repo_api_url(repo: RepoRef) -> str:

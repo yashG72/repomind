@@ -372,3 +372,21 @@ def test_nothing_is_written_to_disk(tmp_path, monkeypatch: pytest.MonkeyPatch) -
     fetch(FakeGitHub(files={"a.py": b"x = 1\n", "evil.sh": b"rm -rf /\n"}))
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_repository_identity_uses_githubs_spelling() -> None:
+    fake = FakeGitHub(
+        files={"a.py": b"x = 1\n"},
+        metadata={"full_name": "Octo/Demo", "default_branch": "main", "private": False, "size": 1},
+    )
+
+    assert fetch(fake).repo == RepoRef(owner="Octo", name="Demo")
+
+
+def test_invalid_canonical_name_is_malformed() -> None:
+    fake = FakeGitHub(
+        metadata={"full_name": "../evil", "default_branch": "main", "private": False, "size": 1}
+    )
+
+    with pytest.raises(MalformedResponse):
+        fetch(fake)
