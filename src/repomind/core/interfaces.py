@@ -9,25 +9,43 @@ Sentence Transformers. Implementations arrive in later phases.
 from collections.abc import Sequence
 from typing import Protocol
 
-from repomind.core.models import CodeChunk, RepoRef, ScoredChunk, SourceFile
+from repomind.core.models import (
+    CodeChunk,
+    FetchResult,
+    RepoRef,
+    ScoredChunk,
+    SkipReason,
+    SourceFile,
+)
 
 
 class RepositoryFetcher(Protocol):
-    """Downloads a repository's files without executing anything from it."""
+    """Downloads a repository's files without executing anything from it.
 
-    def fetch(self, repo: RepoRef) -> list[SourceFile]: ...
+    Returns the indexable files plus a record of every file it skipped and why.
+    """
+
+    def fetch(self, repo: RepoRef) -> FetchResult: ...
 
 
 class FileFilter(Protocol):
-    """Decides which files are worth indexing (skips binaries, secrets, vendored code)."""
+    """Decides which files are worth indexing (skips binaries, secrets, vendored code).
 
-    def is_indexable(self, path: str, size_bytes: int) -> bool: ...
+    The check is split in two so a fetcher can reject a file by its path and size
+    before reading its bytes at all.
+    """
+
+    def check_path(self, path: str, size_bytes: int) -> SkipReason | None: ...
+
+    def check_content(self, path: str, data: bytes) -> SkipReason | None: ...
+
+    def language_for(self, path: str) -> str | None: ...
 
 
 class Chunker(Protocol):
     """Splits a file into line-numbered chunks."""
 
-    def chunk(self, repo: RepoRef, file: SourceFile) -> list[CodeChunk]: ...
+    def chunk(self, repo: RepoRef, commit_sha: str, file: SourceFile) -> list[CodeChunk]: ...
 
 
 class Embedder(Protocol):

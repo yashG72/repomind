@@ -54,3 +54,5 @@ def configure_logging(level: str = "INFO", fmt: str = "json") -> None:
         uv_logger.propagate = True
     # Our request middleware already logs each request; avoid duplicate access lines.
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    # httpx logs every outgoing request at INFO; our own log lines already summarize fetches.
+    logging.getLogger("httpx").setLevel(logging.WARNING)

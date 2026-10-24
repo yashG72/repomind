@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from fastapi import FastAPI, Request, Response
 
 from repomind import __version__
-from repomind.api.routes import health
+from repomind.api.routes import health, ingest
 from repomind.config import Settings, get_settings
 from repomind.logging_config import configure_logging
 
@@ -55,6 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return response
 
     app.include_router(health.router)
+    app.include_router(ingest.router)
     return app
 
 
