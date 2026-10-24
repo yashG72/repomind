@@ -1,0 +1,30 @@
+# Secrets: never commit real environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local data (cloned repositories, vector store volumes, model caches)
+data/
+qdrant_storage/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,9 @@
+# Local development stack. Qdrant will be added here in Phase 3, when RepoMind uses it.
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
