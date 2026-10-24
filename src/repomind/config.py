@@ -25,10 +25,21 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["json", "text"] = "json"
 
-    # Repository ingestion limits (enforced from Phase 2 onwards)
+    # Repository ingestion limits
+    # Largest single file that is indexed; bigger files are skipped.
     max_file_size_bytes: int = Field(default=1_000_000, gt=0)
+    # Largest total uncompressed repository content; bigger repositories are refused.
     max_repo_size_bytes: int = Field(default=200_000_000, gt=0)
+    # Largest compressed archive download; the download is aborted past this point.
+    max_download_bytes: int = Field(default=100_000_000, gt=0)
+    # At most this many files are indexed; the rest are reported as skipped.
     max_files_per_repo: int = Field(default=5_000, gt=0)
+    # Timeout for each request to GitHub.
+    github_timeout_seconds: float = Field(default=30.0, gt=0)
+
+    # Chunking
+    chunk_max_lines: int = Field(default=80, ge=5)
+    chunk_max_chars: int = Field(default=6_000, ge=200)
 
     # Embeddings and vector store (used from Phase 3 onwards)
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"

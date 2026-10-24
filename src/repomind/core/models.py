@@ -4,6 +4,8 @@ These are deliberately small. Every chunk keeps its file path and line range so 
 can always cite exactly where in the repository a piece of code came from.
 """
 
+from enum import StrEnum
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -28,6 +30,42 @@ class SourceFile(BaseModel):
     path: str
     content: str
     size_bytes: int = Field(ge=0)
+    language: str | None = None
+
+
+class SkipReason(StrEnum):
+    """Why a file in the repository was not indexed."""
+
+    UNSAFE_PATH = "unsafe_path"
+    NOT_REGULAR_FILE = "not_regular_file"  # symlinks, hard links, devices
+    EXCLUDED_DIRECTORY = "excluded_directory"  # node_modules, vendor, build output, ...
+    UNSUPPORTED_TYPE = "unsupported_type"
+    LOCK_FILE = "lock_file"
+    SECRET_FILE = "secret_file"  # noqa: S105 (a label, not a password): .env, keys
+    TOO_LARGE = "too_large"
+    EMPTY = "empty"
+    BINARY = "binary"
+    NOT_UTF8 = "not_utf8"
+    GENERATED = "generated"
+    MINIFIED = "minified"
+    FILE_LIMIT = "file_limit"  # max_files_per_repo reached
+
+
+class SkippedFile(BaseModel):
+    path: str
+    reason: SkipReason
+
+
+class FetchResult(BaseModel):
+    """Everything a fetcher found in one repository snapshot."""
+
+    repo: RepoRef
+    commit_sha: str
+    default_branch: str
+    files: list[SourceFile]
+    skipped: list[SkippedFile]
+    files_discovered: int = Field(ge=0)
+    bytes_downloaded: int = Field(ge=0)
 
 
 class CodeChunk(BaseModel):
@@ -35,10 +73,12 @@ class CodeChunk(BaseModel):
 
     chunk_id: str
     repo: RepoRef
+    commit_sha: str
     path: str
     start_line: int = Field(ge=1)
     end_line: int = Field(ge=1)
     language: str | None = None
+    symbol: str | None = None  # e.g. "class Parser" or "def Parser.parse" when known
     text: str
 
     @model_validator(mode="after")
@@ -46,6 +86,13 @@ class CodeChunk(BaseModel):
         if self.end_line < self.start_line:
             raise ValueError("end_line must be >= start_line")
         return self
+
+    @property
+    def github_url(self) -> str:
+        return (
+            f"{self.repo.html_url}/blob/{self.commit_sha}/{self.path}"
+            f"#L{self.start_line}-L{self.end_line}"
+        )
 
 
 class ScoredChunk(BaseModel):
