@@ -64,8 +64,24 @@ class Settings(BaseSettings):
     # Search
     search_default_top_k: int = Field(default=5, ge=1, le=50)
     search_max_query_chars: int = Field(default=2_000, ge=10, le=20_000)
+    # Default retrieval mode when a request does not choose one. "semantic" is Phase 3's
+    # embedding-only search; "hybrid" adds keyword search, fuses both with Reciprocal Rank
+    # Fusion and then reranks (if reranking is enabled).
+    search_mode: Literal["semantic", "hybrid"] = "hybrid"
+    # How many candidates each retriever contributes to fusion in hybrid mode.
+    search_semantic_candidates: int = Field(default=50, ge=1, le=200)
+    search_keyword_candidates: int = Field(default=50, ge=1, le=200)
+    # RRF smoothing constant k in 1 / (k + rank). Larger values flatten the rank curve.
+    search_rrf_k: int = Field(default=60, ge=1, le=1_000)
 
-    # LLM provider (used from Phase 4 onwards)
+    # Reranking (hybrid mode). A Hugging Face cross-encoder id or a local model folder. It
+    # uses the same device, cache folder and offline setting as the embedding model.
+    rerank_enabled: bool = True
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"
+    # Only the top fused candidates are reranked; this bounds CPU time per request.
+    rerank_max_candidates: int = Field(default=20, ge=1, le=100)
+
+    # LLM provider (not used yet; reserved for a later phase)
     llm_provider: str = "none"
     llm_model: str = ""
     llm_api_key: SecretStr | None = None

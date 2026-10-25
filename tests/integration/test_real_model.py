@@ -24,7 +24,7 @@ from repomind.ingestion.file_filter import DefaultFileFilter
 from repomind.ingestion.github_fetcher import GitHubFetcher
 from repomind.ingestion.service import IngestionService
 from repomind.retrieval.indexing import IndexingService
-from repomind.retrieval.search import SearchService
+from repomind.retrieval.search import SearchMode, SearchService
 from repomind.vectorstore.qdrant import QdrantVectorStore
 from tests.github_fake import FakeGitHub
 from tests.sample_repo import QUESTIONS, SAMPLE_FILES
@@ -81,14 +81,25 @@ def test_dimension_is_read_from_the_model(embedder) -> None:
     assert sum(x * x for x in vector) == pytest.approx(1.0, abs=1e-4)  # normalized
 
 
-def test_natural_language_questions_find_the_right_code(settings, embedder, store) -> None:
+@pytest.mark.parametrize("mode", list(SearchMode))
+def test_natural_language_questions_find_the_right_code(settings, embedder, store, mode) -> None:
     summary = index(settings, embedder, store).index(URL)
     assert summary.embeddings_computed == summary.chunks_indexed > 0
 
-    search = SearchService(embedder, store)
+    search = SearchService(embedder, store)  # no reranker here; see test_real_reranker.py
     for question, (path, symbol) in QUESTIONS.items():
-        top = search.search(URL, question, top_k=3).results[0]
+        response = search.search(URL, question, top_k=3, mode=mode)
+        assert response.mode == mode and response.warnings == []
+        top = response.results[0]
         assert (top.path, top.symbol) == (path, symbol), question
+
+
+def test_keyword_search_finds_exact_names(settings, embedder, store) -> None:
+    index(settings, embedder, store).index(URL)
+
+    hits = store.keyword_search(REPO, "retry_with_backoff", limit=3)
+
+    assert hits[0].chunk.symbol == "def retry_with_backoff"
 
 
 def test_vectors_persist_and_reindexing_reuses_them(settings, embedder, store) -> None:

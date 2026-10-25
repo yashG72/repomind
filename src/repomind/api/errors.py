@@ -18,6 +18,7 @@ from repomind.ingestion.errors import (
     RepositoryTooLarge,
 )
 from repomind.ingestion.github_url import InvalidRepositoryURL
+from repomind.reranking.errors import RerankerError
 from repomind.retrieval.errors import InvalidQuery, RepositoryNotIndexed
 from repomind.vectorstore.errors import CollectionMismatch, VectorStoreError
 
@@ -34,6 +35,7 @@ _STATUS_BY_ERROR: list[tuple[type[Exception], int]] = [
     (GitHubUnavailable, status.HTTP_503_SERVICE_UNAVAILABLE),
     (IngestionError, status.HTTP_502_BAD_GATEWAY),  # malformed response, unsafe redirect
     (EmbeddingError, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (RerankerError, status.HTTP_503_SERVICE_UNAVAILABLE),
     (CollectionMismatch, status.HTTP_500_INTERNAL_SERVER_ERROR),
     (VectorStoreError, status.HTTP_503_SERVICE_UNAVAILABLE),
 ]
