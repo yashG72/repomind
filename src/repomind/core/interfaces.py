@@ -7,7 +7,7 @@ Sentence Transformers. Implementations arrive in later phases.
 """
 
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Any, Protocol
 
 from repomind.core.models import (
     CodeChunk,
@@ -122,6 +122,16 @@ class Reranker(Protocol):
 
 
 class LLMClient(Protocol):
-    """Generates text from a prompt. Swappable between providers."""
+    """Generates text from a prompt. Swappable between providers.
 
-    def generate(self, system_prompt: str, user_prompt: str) -> str: ...
+    `generate` returns a JSON document matching `response_schema` (a JSON Schema object); the
+    caller still validates it. Failures raise the errors in repomind.generation.errors, whose
+    messages never include the prompt, the key or the provider's response.
+    """
+
+    @property
+    def model_name(self) -> str: ...
+
+    def generate(
+        self, system_prompt: str, user_prompt: str, response_schema: dict[str, Any]
+    ) -> str: ...

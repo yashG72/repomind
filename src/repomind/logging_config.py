@@ -56,3 +56,7 @@ def configure_logging(level: str = "INFO", fmt: str = "json") -> None:
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     # httpx logs every outgoing request at INFO; our own log lines already summarize fetches.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # The Anthropic SDK logs whole requests (prompts, so retrieved code) at DEBUG, and httpx2
+    # (its HTTP library) logs every request at INFO. Our own log lines summarize answer calls.
+    logging.getLogger("anthropic").setLevel(logging.WARNING)
+    logging.getLogger("httpx2").setLevel(logging.WARNING)

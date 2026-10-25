@@ -111,9 +111,14 @@ class ScoredChunk(BaseModel):
 
 
 class Citation(BaseModel):
-    """A file reference attached to an answer."""
+    """A file reference attached to an answer. Every field comes from retrieval metadata,
+    never from the model's own text."""
 
+    id: str  # the evidence id the answer cites, e.g. "S1"
+    repository: str
     path: str
     start_line: int
     end_line: int
+    commit_sha: str
     url: str
+    symbol: str | None = None

@@ -1,6 +1,8 @@
-"""Small, deterministic stand-ins for the embedding model, the vector store and the reranker."""
+"""Small, deterministic stand-ins for the embedding model, the vector store, the reranker and
+the answer model."""
 
 import hashlib
+import json
 import math
 import re
 from collections.abc import Sequence
@@ -181,3 +183,33 @@ class FakeReranker:
             float(len(terms & set(tokenize(document_text(c.chunk))))) for c in candidates
         ]
         return order_by_scores(candidates, scores)
+
+
+class FakeLLM:
+    """Stands in for the answer model: returns a scripted reply (or raises a scripted error)
+    and records every prompt it was given. Never touches the network."""
+
+    def __init__(self, reply: str | None = None, model_name: str = "fake-llm") -> None:
+        self._model_name = model_name
+        self.reply = reply if reply is not None else answer_json("It works [S1].", ["S1"])
+        self.error: Exception | None = None
+        self.calls: list[tuple[str, str]] = []  # (system prompt, user prompt)
+        self.schemas: list[dict] = []
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    def generate(self, system_prompt: str, user_prompt: str, response_schema: dict) -> str:
+        self.calls.append((system_prompt, user_prompt))
+        self.schemas.append(response_schema)
+        if self.error is not None:
+            raise self.error
+        return self.reply
+
+
+def answer_json(answer: str, citations: list[str], insufficient: bool = False) -> str:
+    """A reply in the format the answer model must use."""
+    return json.dumps(
+        {"answer": answer, "citations": citations, "insufficient_evidence": insufficient}
+    )
