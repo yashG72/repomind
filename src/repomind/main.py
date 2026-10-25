@@ -14,6 +14,7 @@ from repomind.api.routes import health, ingest, retrieval
 from repomind.config import Settings, get_settings
 from repomind.embeddings.sentence_transformer import SentenceTransformerEmbedder
 from repomind.logging_config import configure_logging
+from repomind.reranking.cross_encoder import CrossEncoderReranker
 from repomind.vectorstore.qdrant import QdrantVectorStore
 
 logger = logging.getLogger("repomind.request")
@@ -23,7 +24,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level, settings.log_format)
 
-    # Shared, long-lived resources. Both are lazy: the model loads and the database opens on
+    # Shared, long-lived resources. All are lazy: the models load and the database opens on
     # first use, so starting the app (and running tests) stays fast.
     vector_store = QdrantVectorStore.from_settings(settings)
 
@@ -38,6 +39,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.embedding_model,
         device=settings.embedding_device,
         batch_size=settings.embedding_batch_size,
+        cache_dir=settings.embedding_cache_dir,
+        local_files_only=settings.embedding_local_files_only,
+    )
+    app.state.reranker = CrossEncoderReranker(
+        settings.rerank_model,
+        device=settings.embedding_device,
+        max_candidates=settings.rerank_max_candidates,
         cache_dir=settings.embedding_cache_dir,
         local_files_only=settings.embedding_local_files_only,
     )

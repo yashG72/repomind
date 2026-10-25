@@ -3,9 +3,14 @@ and a fake GitHub."""
 
 import pytest
 from fastapi.testclient import TestClient
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 
-from repomind.api.dependencies import get_embedder, get_ingestion_service, get_vector_store
+from repomind.api.dependencies import (
+    get_embedder,
+    get_ingestion_service,
+    get_reranker,
+    get_vector_store,
+)
 from repomind.config import Settings
 from repomind.ingestion.chunking import CodeChunker
 from repomind.ingestion.file_filter import DefaultFileFilter
@@ -13,7 +18,7 @@ from repomind.ingestion.github_fetcher import GitHubFetcher
 from repomind.ingestion.service import IngestionService
 from repomind.main import create_app
 from repomind.vectorstore.qdrant import QdrantVectorStore
-from tests.fakes import FakeEmbedder
+from tests.fakes import FakeEmbedder, FakeReranker
 from tests.github_fake import SHA, FakeGitHub
 from tests.sample_repo import SAMPLE_FILES
 
@@ -32,7 +37,14 @@ def store() -> QdrantVectorStore:
 
 
 @pytest.fixture
-def api(settings: Settings, embedder: FakeEmbedder, store: QdrantVectorStore) -> TestClient:
+def reranker() -> FakeReranker:
+    return FakeReranker()
+
+
+@pytest.fixture
+def api(
+    settings: Settings, embedder: FakeEmbedder, store: QdrantVectorStore, reranker: FakeReranker
+) -> TestClient:
     fake = FakeGitHub(files=dict(SAMPLE_FILES))
     app = create_app(settings)
 
@@ -43,6 +55,7 @@ def api(settings: Settings, embedder: FakeEmbedder, store: QdrantVectorStore) ->
     app.dependency_overrides[get_ingestion_service] = ingestion
     app.dependency_overrides[get_embedder] = lambda: embedder
     app.dependency_overrides[get_vector_store] = lambda: store
+    app.dependency_overrides[get_reranker] = lambda: reranker
     return TestClient(app)
 
 
@@ -139,3 +152,165 @@ def test_secret_values_are_not_returned_or_stored(api: TestClient, store) -> Non
 
     assert "sk_live_" not in response.text
     assert "[REDACTED]" in response.text
+
+
+# --- Phase 4: hybrid search and reranking ---------------------------------------------------
+
+
+def test_default_search_is_hybrid_without_reranking(
+    api: TestClient, reranker: FakeReranker
+) -> None:
+    api.post("/index", json={"repo_url": URL})
+
+    result = api.post("/search", json={"repo_url": URL, "query": "hash_password"}).json()
+
+    assert result["mode"] == "hybrid"
+    assert result["reranker_model"] is None
+    assert result["warnings"] == []
+    assert reranker.calls == []
+    top = result["results"][0]
+    assert (top["path"], top["symbol"]) == ("auth/passwords.py", "def hash_password")
+    assert top["scores"]["keyword_rank"] == 1
+    assert top["scores"]["rerank"] is None
+    assert top["score"] == top["scores"]["rrf"]
+    # Phase 3 fields and citation format are unchanged.
+    assert set(top) >= {
+        "score",
+        "path",
+        "start_line",
+        "end_line",
+        "symbol",
+        "language",
+        "commit_sha",
+        "url",
+        "text",
+    }
+    assert top["commit_sha"] == SHA
+    assert top["url"] == (
+        f"https://github.com/octo/demo/blob/{SHA}/auth/passwords.py"
+        f"#L{top['start_line']}-L{top['end_line']}"
+    )
+    assert "def hash_password(password):" in top["text"]
+
+
+def test_rerank_can_be_requested(api: TestClient, reranker: FakeReranker) -> None:
+    api.post("/index", json={"repo_url": URL})
+
+    result = api.post(
+        "/search", json={"repo_url": URL, "query": "hash_password", "rerank": True}
+    ).json()
+
+    assert result["mode"] == "hybrid" and result["reranker_model"] == "fake-reranker"
+    top = result["results"][0]
+    assert top["symbol"] == "def hash_password"
+    assert top["scores"]["rerank"] == top["score"]
+    assert len(reranker.calls) == 1 and 5 <= reranker.calls[0] <= 20  # bounded candidate set
+
+
+def test_semantic_mode_matches_phase3(api: TestClient, reranker: FakeReranker) -> None:
+    api.post("/index", json={"repo_url": URL})
+
+    result = api.post(
+        "/search", json={"repo_url": URL, "query": "hash password salt", "mode": "semantic"}
+    ).json()
+
+    assert result["mode"] == "semantic" and result["reranker_model"] is None
+    top = result["results"][0]
+    assert top["path"] == "auth/passwords.py"
+    assert top["score"] == pytest.approx(top["scores"]["semantic"], abs=1e-4)
+    assert top["scores"]["keyword"] is None and top["scores"]["rrf"] is None
+    assert reranker.calls == []
+
+
+def test_hybrid_without_rerank(api: TestClient, reranker: FakeReranker) -> None:
+    api.post("/index", json={"repo_url": URL})
+
+    result = api.post(
+        "/search", json={"repo_url": URL, "query": "retry_with_backoff", "rerank": False}
+    ).json()
+
+    assert result["reranker_model"] is None and reranker.calls == []
+    assert result["results"][0]["symbol"] == "def retry_with_backoff"
+    assert result["results"][0]["score"] == result["results"][0]["scores"]["rrf"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"mode": "keyword"}, {"mode": "semantic", "rerank": True}, {"rerank": "maybe"}],
+)
+def test_invalid_mode_or_rerank_is_422(api: TestClient, extra: dict) -> None:
+    api.post("/index", json={"repo_url": URL})
+
+    response = api.post("/search", json={"repo_url": URL, "query": "x", **extra})
+
+    assert response.status_code == 422
+
+
+def test_reranker_failure_is_503_without_internals(api: TestClient, reranker: FakeReranker) -> None:
+    api.post("/index", json={"repo_url": URL})
+    reranker.fail = True
+
+    response = api.post("/search", json={"repo_url": URL, "query": "password", "rerank": True})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Could not load reranking model 'fake-reranker'"}
+    assert "Traceback" not in response.text
+    # Searches that do not rerank do not need the model and keep working.
+    for body in ({}, {"mode": "semantic"}, {"rerank": False}):
+        ok = api.post("/search", json={"repo_url": URL, "query": "password", **body})
+        assert ok.status_code == 200
+
+
+def test_rerank_enabled_by_settings(
+    settings: Settings, embedder, store, reranker: FakeReranker
+) -> None:
+    app = create_app(settings.model_copy(update={"rerank_enabled": True}))
+    fake = FakeGitHub(files=dict(SAMPLE_FILES))
+    app.dependency_overrides[get_ingestion_service] = lambda: IngestionService(
+        GitHubFetcher(settings, DefaultFileFilter(10_000), transport=fake.transport()),
+        CodeChunker(),
+    )
+    app.dependency_overrides[get_embedder] = lambda: embedder
+    app.dependency_overrides[get_vector_store] = lambda: store
+    app.dependency_overrides[get_reranker] = lambda: reranker
+    client = TestClient(app)
+    client.post("/index", json={"repo_url": URL})
+
+    default = client.post("/search", json={"repo_url": URL, "query": "password"})
+    off = client.post("/search", json={"repo_url": URL, "query": "password", "rerank": False})
+
+    assert default.status_code == 200 and default.json()["reranker_model"] == "fake-reranker"
+    assert off.status_code == 200 and off.json()["reranker_model"] is None
+    assert len(reranker.calls) == 1
+
+
+def test_phase3_collection_still_searches_with_a_warning(
+    settings: Settings, embedder: FakeEmbedder, reranker: FakeReranker
+) -> None:
+    client = QdrantClient(":memory:")
+    client.create_collection(  # how Phase 3 created collections: no keyword index
+        "legacy", vectors_config=models.VectorParams(size=64, distance=models.Distance.COSINE)
+    )
+    legacy = QdrantVectorStore(lambda: client, "legacy", payload_indexes=False)
+    app = create_app(settings)
+    fake = FakeGitHub(files=dict(SAMPLE_FILES))
+    app.dependency_overrides[get_ingestion_service] = lambda: IngestionService(
+        GitHubFetcher(settings, DefaultFileFilter(10_000), transport=fake.transport()),
+        CodeChunker(),
+    )
+    app.dependency_overrides[get_embedder] = lambda: embedder
+    app.dependency_overrides[get_vector_store] = lambda: legacy
+    app.dependency_overrides[get_reranker] = lambda: reranker
+    api = TestClient(app)
+    assert api.post("/index", json={"repo_url": URL}).status_code == 200
+
+    hybrid = api.post("/search", json={"repo_url": URL, "query": "hash password salt"})
+    semantic = api.post(
+        "/search", json={"repo_url": URL, "query": "hash password salt", "mode": "semantic"}
+    )
+
+    assert hybrid.status_code == semantic.status_code == 200
+    assert "Keyword search is unavailable" in hybrid.json()["warnings"][0]
+    assert hybrid.json()["results"][0]["path"] == "auth/passwords.py"
+    assert hybrid.json()["results"][0]["scores"]["keyword"] is None
+    assert semantic.json()["warnings"] == []

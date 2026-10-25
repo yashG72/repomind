@@ -67,7 +67,8 @@ class Embedder(Protocol):
 
 
 class VectorStore(Protocol):
-    """Stores chunk vectors and finds the nearest ones to a query vector.
+    """Stores chunk vectors and finds the nearest ones to a query vector. Also finds chunks
+    by keyword (exact names and words), ranked with BM25.
 
     Every read and delete is scoped to one repository, so results never mix repositories.
     """
@@ -96,9 +97,26 @@ class VectorStore(Protocol):
         commit_sha: str | None = None,
     ) -> list[ScoredChunk]: ...
 
+    def supports_keyword_search(self) -> bool: ...
+
+    def keyword_search(
+        self,
+        repo: RepoRef,
+        query: str,
+        limit: int,
+        commit_sha: str | None = None,
+    ) -> list[ScoredChunk]: ...
+
 
 class Reranker(Protocol):
-    """Reorders candidate chunks by relevance to the question."""
+    """Reorders candidate chunks by relevance to the question.
+
+    Returns the same chunks (no more, no fewer), best first, each with the reranker's own
+    relevance score in place of the score it arrived with.
+    """
+
+    @property
+    def model_name(self) -> str: ...
 
     def rerank(self, query: str, candidates: Sequence[ScoredChunk]) -> list[ScoredChunk]: ...
 

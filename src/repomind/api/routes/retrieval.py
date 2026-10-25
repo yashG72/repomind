@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from repomind.api.dependencies import get_indexing_service, get_search_service
 from repomind.config import Settings, get_settings
 from repomind.retrieval.indexing import IndexingService, IndexingSummary
-from repomind.retrieval.search import SearchResponse, SearchService
+from repomind.retrieval.search import SearchMode, SearchResponse, SearchService
 
 router = APIRouter(tags=["retrieval"])
 
@@ -23,6 +23,11 @@ class SearchRequest(BaseModel):
     top_k: int | None = Field(default=None, ge=1, le=50)
     # Optional: search one specific indexed commit instead of the current one.
     commit_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+    # Optional: "semantic" (Phase 3 behaviour) or "hybrid"; default REPOMIND_SEARCH_MODE.
+    mode: SearchMode | None = None
+    # Optional, hybrid mode only: rerank this request or not; default REPOMIND_RERANK_ENABLED
+    # (off unless configured).
+    rerank: bool | None = None
 
 
 @router.post("/index", response_model=IndexingSummary)
@@ -45,4 +50,11 @@ def search(
             f"query is longer than {settings.search_max_query_chars} characters",
         )
     top_k = request.top_k or settings.search_default_top_k
-    return service.search(request.repo_url, request.query, top_k, request.commit_sha)
+    return service.search(
+        request.repo_url,
+        request.query,
+        top_k,
+        request.commit_sha,
+        mode=request.mode,
+        rerank=request.rerank,
+    )

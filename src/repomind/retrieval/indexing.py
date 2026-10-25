@@ -16,10 +16,12 @@ from collections.abc import Sequence
 from pydantic import BaseModel
 
 from repomind.core.interfaces import Embedder, VectorStore
-from repomind.core.models import CodeChunk
+from repomind.core.models import CodeChunk, document_text
 from repomind.ingestion.service import IngestionService, IngestionSummary
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["IndexingService", "IndexingSummary", "document_text"]
 
 
 class IndexingSummary(BaseModel):
@@ -32,13 +34,6 @@ class IndexingSummary(BaseModel):
     embeddings_reused: int
     stale_chunks_deleted: int  # chunks from older commits that were removed
     duration_ms: float
-
-
-def document_text(chunk: CodeChunk) -> str:
-    """The text that is embedded for a chunk. The path and symbol help match questions such
-    as "where is the GitHub fetcher?" even when the code itself never says so."""
-    header = chunk.path if chunk.symbol is None else f"{chunk.path}\n{chunk.symbol}"
-    return f"{header}\n\n{chunk.text}"
 
 
 class IndexingService:

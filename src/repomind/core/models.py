@@ -95,6 +95,14 @@ class CodeChunk(BaseModel):
         )
 
 
+def document_text(chunk: CodeChunk) -> str:
+    """The text that represents a chunk for search (embedding, keywords, reranking). The path
+    and symbol help match questions such as "where is the GitHub fetcher?" even when the code
+    itself never says so."""
+    header = chunk.path if chunk.symbol is None else f"{chunk.path}\n{chunk.symbol}"
+    return f"{header}\n\n{chunk.text}"
+
+
 class ScoredChunk(BaseModel):
     """A chunk returned by retrieval, with the score that ranked it."""
 

@@ -13,7 +13,11 @@ from qdrant_client import QdrantClient, models
 
 from repomind.config import Settings
 from repomind.core.models import CodeChunk, RepoRef
-from repomind.vectorstore.errors import CollectionMismatch, VectorStoreUnavailable
+from repomind.vectorstore.errors import (
+    CollectionMismatch,
+    KeywordSearchUnavailable,
+    VectorStoreUnavailable,
+)
 from repomind.vectorstore.qdrant import QdrantVectorStore, point_id
 
 SERVER_URL = os.environ.get("REPOMIND_TEST_QDRANT_URL")
@@ -204,3 +208,156 @@ def test_local_storage_persists_across_restarts(tmp_path) -> None:
     assert second.count(A) == 1
     assert second.search(A, [1, 0, 0, 0], 1, MODEL)[0].chunk.path == "a.py"
     second.close()
+
+
+# --- Keyword search -------------------------------------------------------------------------
+
+
+def code(repo: RepoRef, path: str, text: str, sha: str = SHA1, symbol: str | None = None):
+    c = chunk(repo, path, sha, text=text)
+    return c.model_copy(update={"symbol": symbol})
+
+
+def index_texts(store: QdrantVectorStore, chunks: list[CodeChunk]) -> None:
+    store.upsert(chunks, [[1, 0, 0, 0]] * len(chunks), MODEL)
+
+
+def test_new_collections_support_keyword_search(store: QdrantVectorStore) -> None:
+    assert store.supports_keyword_search()
+
+
+def test_keyword_search_finds_exact_identifiers(store: QdrantVectorStore) -> None:
+    target = code(
+        A, "auth/passwords.py", "def hash_password(pw):\n    return pw", symbol="def hash_password"
+    )
+    index_texts(
+        store,
+        [
+            code(A, "billing/invoice.py", "def calculate_invoice_total(items): ..."),
+            target,
+            code(A, "auth/session.py", "def password_reset(user):\n    # resets a password"),
+        ],
+    )
+
+    hits = store.keyword_search(A, "hash_password", limit=5)
+
+    assert hits[0].chunk == target
+    assert hits[0].score > 0
+    assert "billing/invoice.py" not in [h.chunk.path for h in hits]  # shares no term
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("GitHubFetcher", "src/fetch.py"),  # class name
+        ("github_fetcher.py", "src/github_fetcher.py"),  # file name
+        ("MAX_RETRY_ATTEMPTS", "src/config.py"),  # constant / variable
+        ("Repository archive is too large", "src/errors.py"),  # error message
+    ],
+)
+def test_keyword_search_kinds_of_lookup(
+    store: QdrantVectorStore, query: str, expected: str
+) -> None:
+    index_texts(
+        store,
+        [
+            code(A, "src/fetch.py", "class GitHubFetcher:\n    def fetch(self): ..."),
+            code(A, "src/github_fetcher.py", "from fetch import download\n"),
+            code(A, "src/config.py", "MAX_RETRY_ATTEMPTS = 5\nTIMEOUT = 30"),
+            code(A, "src/errors.py", 'raise TooLarge("Repository archive is too large")'),
+            code(A, "src/other.py", "def unrelated(): return 1"),
+        ],
+    )
+
+    hits = store.keyword_search(A, query, limit=3)
+
+    assert hits[0].chunk.path == expected
+
+
+def test_keyword_search_never_returns_other_repositories(store: QdrantVectorStore) -> None:
+    index_texts(
+        store,
+        [code(A, "a.py", "def other_thing(): ..."), code(B, "b.py", "def hash_password(): ...")],
+    )
+
+    assert store.keyword_search(A, "hash_password", limit=10) == []
+    assert [h.chunk.repo for h in store.keyword_search(B, "hash_password", limit=10)] == [B]
+
+
+def test_keyword_search_can_target_a_commit(store: QdrantVectorStore) -> None:
+    index_texts(
+        store,
+        [code(A, "a.py", "def parse(): ...", SHA1), code(A, "a.py", "def parse(): ...", SHA2)],
+    )
+
+    hits = store.keyword_search(A, "parse", limit=5, commit_sha=SHA2)
+
+    assert [h.chunk.commit_sha for h in hits] == [SHA2]
+    assert len(store.keyword_search(A, "parse", limit=5)) == 2
+
+
+def test_keyword_search_respects_limit_and_handles_unsearchable_queries(store) -> None:
+    index_texts(store, [code(A, f"m{i}.py", "def handler(): ...") for i in range(6)])
+
+    assert len(store.keyword_search(A, "handler", limit=4)) == 4
+    assert store.keyword_search(A, "?? the is", limit=4) == []
+    assert store.keyword_search(A, "nonexistentterm", limit=4) == []
+
+
+def test_rare_terms_outweigh_common_ones(store: QdrantVectorStore) -> None:
+    common = [code(A, f"c{i}.py", "def handler(request): return request") for i in range(5)]
+    rare = code(A, "rare.py", "def handler(request): validate_signature(request)")
+    index_texts(store, [*common, rare])
+
+    hits = store.keyword_search(A, "handler validate_signature", limit=3)
+
+    assert hits[0].chunk.path == "rare.py"
+
+
+def test_existing_ids_requires_current_keyword_encoding(store: QdrantVectorStore) -> None:
+    c = chunk(A, "a.py")
+    index_texts(store, [c])
+    assert store.existing_ids([c.chunk_id], MODEL) == {c.chunk_id}
+
+    # Simulate a point stored by an older keyword encoding: it must be re-indexed.
+    store._get_client().set_payload(
+        store.collection, payload={"keyword_version": 0}, points=[point_id(c.chunk_id)], wait=True
+    )
+
+    assert store.existing_ids([c.chunk_id], MODEL) == set()
+    assert store.keyword_search(A, "code", limit=5) == []  # old encoding is not searched
+
+
+def test_missing_collection_keyword_search_is_empty() -> None:
+    client = QdrantClient(":memory:")
+    store = QdrantVectorStore(lambda: client, "never_created", payload_indexes=False)
+
+    assert store.supports_keyword_search()  # it will be created with keyword support
+    assert store.keyword_search(A, "anything", 5) == []
+
+
+def test_phase3_collection_keeps_semantic_search_but_not_keywords() -> None:
+    client = QdrantClient(":memory:")
+    client.create_collection(  # exactly how Phase 3 created collections
+        "legacy", vectors_config=models.VectorParams(size=4, distance=models.Distance.COSINE)
+    )
+    store = QdrantVectorStore(lambda: client, "legacy", payload_indexes=False)
+    store.ensure_collection(4)
+    c = chunk(A, "a.py")
+
+    store.upsert([c], [[1, 0, 0, 0]], MODEL)  # stores without a keyword vector, no error
+
+    assert not store.supports_keyword_search()
+    assert store.existing_ids([c.chunk_id], MODEL) == {c.chunk_id}
+    assert store.search(A, [1, 0, 0, 0], 5, MODEL)[0].chunk == c
+    with pytest.raises(KeywordSearchUnavailable):
+        store.keyword_search(A, "code", 5)
+
+
+def test_chunk_without_searchable_terms_is_stored(store: QdrantVectorStore) -> None:
+    c = code(A, "a/b", "= + ;")  # no term survives tokenization: an empty sparse vector
+
+    index_texts(store, [c])
+
+    assert store.count(A) == 1
+    assert store.search(A, [1, 0, 0, 0], 5, MODEL)[0].chunk == c

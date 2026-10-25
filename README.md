@@ -4,10 +4,13 @@ RepoMind lets you point at a public GitHub repository, index its source files, a
 natural-language questions about how it works. Every answer is grounded in retrieved source
 code and cites the files and line numbers it came from.
 
-> **Status: Phase 3 (semantic retrieval).** RepoMind can fetch a public GitHub repository,
+> **Status: Phase 4 (hybrid retrieval).** RepoMind can fetch a public GitHub repository,
 > split it into line-numbered chunks, embed them with Sentence Transformers, store them in
-> Qdrant, and return the chunks most relevant to a question. Hybrid search, reranking and
-> LLM-written answers arrive in later phases.
+> Qdrant, and return the chunks most relevant to a question. Search combines semantic
+> (meaning-based) and keyword (exact-name) retrieval and merges them with Reciprocal Rank
+> Fusion. Reranking the best candidates with a local cross-encoder model is available but off
+> by default (see [Reranking](#reranking-off-by-default)). LLM-written answers arrive in a
+> later phase.
 
 ## Quick start
 
@@ -24,7 +27,9 @@ curl http://127.0.0.1:8000/health
 Interactive API docs are served at http://127.0.0.1:8000/docs.
 
 The first `/index` or `/search` call downloads the embedding model (about 90 MB) from
-Hugging Face and loads it, which takes a few seconds; later calls reuse the loaded model.
+Hugging Face and loads it, which takes a few seconds; later calls reuse the loaded model. If
+you turn reranking on, the first reranked search also downloads and loads the reranking model
+(about 90 MB).
 
 ### Tests and linting
 
@@ -34,14 +39,23 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-Integration tests use the real embedding model and a real Qdrant server. They are skipped
-unless you point them at both:
+Integration tests use the real models and a real Qdrant server. Each part is skipped unless
+you point it at the real thing:
 
 ```bash
 docker compose up -d qdrant
 REPOMIND_TEST_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2 \
+REPOMIND_TEST_RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L6-v2 \
 REPOMIND_TEST_QDRANT_URL=http://localhost:6333 \
 uv run pytest -m integration
+```
+
+The retrieval evaluation (see [Evaluation](#evaluation)) prints a report comparing the search
+modes:
+
+```bash
+uv run python -m tests.evaluation          # deterministic fakes, no downloads
+uv run python -m tests.evaluation --real   # real embedding and reranking models
 ```
 
 ### Docker
@@ -51,7 +65,7 @@ docker compose up --build   # API on port 8000 plus a Qdrant server on port 6333
 ```
 
 The image runs as a non-root user, contains no `.env` file, and has a built-in health check.
-Vectors persist in the `qdrant_data` volume and the downloaded model in `model_cache`.
+Vectors persist in the `qdrant_data` volume and the downloaded models in `model_cache`.
 PyTorch is the CPU-only build (see Embedding devices), which keeps the image small.
 
 ## Ingesting a repository
@@ -167,43 +181,207 @@ curl -X POST http://127.0.0.1:8000/index \
 }
 ```
 
-`POST /search` embeds a question and returns the closest chunks of that repository:
+`POST /search` returns the chunks of that repository that best answer a question:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/search \
   -H 'Content-Type: application/json' \
-  -d '{"repo_url": "https://github.com/yashG72/repomind", "query": "health check endpoint", "top_k": 3}'
+  -d '{"repo_url": "https://github.com/yashG72/repomind", "query": "parse_github_repo_url", "top_k": 2}'
 ```
 
 ```json
 {
   "repository": "yashG72/repomind",
-  "query": "health check endpoint",
+  "query": "parse_github_repo_url",
   "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
   "results": [
     {
-      "score": 0.4552,
-      "path": "src/repomind/api/routes/health.py",
-      "start_line": 22,
-      "end_line": 29,
-      "symbol": "def health",
+      "score": 0.032018,
+      "path": "src/repomind/ingestion/github_fetcher.py",
+      "start_line": 293,
+      "end_line": 297,
+      "symbol": "def _canonical_repo",
       "language": "python",
-      "commit_sha": "f410af6645fa07f56f0eae3b01687beec1bca235",
-      "url": "https://github.com/yashG72/repomind/blob/f410af6645fa07f56f0eae3b01687beec1bca235/src/repomind/api/routes/health.py#L22-L29",
-      "text": "@router.get(\"/health\", ...)\ndef health(...): ..."
+      "commit_sha": "5711c5613e83c3a565a0c549e7a40ea5fd01720a",
+      "url": "https://github.com/yashG72/repomind/blob/5711c5613e83c3a565a0c549e7a40ea5fd01720a/src/repomind/ingestion/github_fetcher.py#L293-L297",
+      "text": "def _canonical_repo(full_name: str) -> RepoRef: ...",
+      "scores": {
+        "semantic": 0.68898976,
+        "semantic_rank": 1,
+        "keyword": 15.466579,
+        "keyword_rank": 4,
+        "rrf": 0.032018,
+        "rerank": null
+      }
+    },
+    {
+      "score": 0.031778,
+      "path": "src/repomind/ingestion/github_url.py",
+      "start_line": 31,
+      "end_line": 51,
+      "symbol": "def parse_github_repo_url",
+      "language": "python",
+      "commit_sha": "5711c5613e83c3a565a0c549e7a40ea5fd01720a",
+      "url": "https://github.com/yashG72/repomind/blob/5711c5613e83c3a565a0c549e7a40ea5fd01720a/src/repomind/ingestion/github_url.py#L31-L51",
+      "text": "def parse_github_repo_url(url: str) -> RepoRef: ...",
+      "scores": {
+        "semantic": 0.61904025,
+        "semantic_rank": 5,
+        "keyword": 16.951433,
+        "keyword_rank": 1,
+        "rrf": 0.031778,
+        "rerank": null
+      }
     }
-  ]
+  ],
+  "duration_ms": 22.87,
+  "mode": "hybrid",
+  "reranker_model": null,
+  "warnings": []
 }
 ```
 
-| Field | Meaning |
+(A real run against this repository with the default settings and a Qdrant server, with
+`text` cut to its first line. Without reranking, `_canonical_repo`, which calls
+`parse_github_repo_url`, is ranked just above the definition: semantic search put it 1st and
+keyword search 4th, while the definition was 5th and 1st. With `"rerank": true` the
+definition came first, at about 0.5 s per search on a 4-core CPU instead of about 20 ms.)
+
+| Request field | Meaning |
 |---|---|
 | `top_k` | Number of results, 1–50 (default `REPOMIND_SEARCH_DEFAULT_TOP_K`, 5) |
 | `commit_sha` | Optional: search one specific indexed commit |
-| `score` | Cosine similarity; higher is closer. Compare scores within one query, not across queries |
+| `mode` | Optional: `"hybrid"` or `"semantic"` (default `REPOMIND_SEARCH_MODE`, hybrid) |
+| `rerank` | Optional, hybrid only: `true`/`false` to rerank this request or not (default `REPOMIND_RERANK_ENABLED`, which is `false`) |
 
-Search returns 404 if the repository has not been indexed, 503 if the model or Qdrant is
-unavailable, and 422 for an empty or too-long query.
+| Response field | Meaning |
+|---|---|
+| `mode` | The mode that ran |
+| `reranker_model` | The reranking model, or `null` if results were not reranked |
+| `warnings` | Anything that limited the search, e.g. keyword search unavailable on an old collection |
+| `results[].score` | The score that produced the order: cosine similarity in semantic mode; the RRF score in hybrid mode; the reranker score for results that were reranked. Compare within one query only |
+| `results[].scores` | What each stage said about the result (`semantic`, `keyword`, `rrf`, `rerank` scores and the 1-based `semantic_rank`/`keyword_rank`); `null` where a stage did not run or did not find it. For debugging |
+
+All Phase 3 fields (`score`, `path`, `start_line`, `end_line`, `symbol`, `language`,
+`commit_sha`, `url`, `text`) and the citation URL format are unchanged; the new fields are
+additions. One behaviour change: in hybrid mode (the new default) `score` is no longer a
+cosine similarity. Clients that relied on that should send `"mode": "semantic"` or read
+`scores.semantic`.
+
+Search returns 404 if the repository has not been indexed, 503 if a model or Qdrant is
+unavailable, and 422 for an empty or too-long query, an unknown mode, or `rerank: true` with
+`"mode": "semantic"`. Error bodies are a short `{"detail": "..."}` message; stack traces are
+only written to the server log, never returned.
+
+### How hybrid search works
+
+Two kinds of search are good at different questions:
+
+- **Semantic search** compares meanings. "How are passwords stored?" finds `hash_password`
+  even though the question never says "hash". It can miss exact names, especially in large
+  repositories where many chunks look alike.
+- **Keyword search** matches words. `parse_github_repo_url`, `github_fetcher.py`,
+  `MAX_UPLOAD_BYTES` or an error message like "Repository archive is above the download
+  limit" are found precisely, but a question phrased in different words finds little.
+
+Hybrid mode runs both and merges the results:
+
+1. **Validate** the query and repository, and check the repository (and commit) is indexed.
+2. **Semantic search**: embed the question once and take the closest
+   `REPOMIND_SEARCH_SEMANTIC_CANDIDATES` chunks (50).
+3. **Keyword search**: take the best `REPOMIND_SEARCH_KEYWORD_CANDIDATES` chunks (50) by
+   BM25, the standard search-engine ranking formula. Both searches use the same repository and
+   commit filter.
+4. **Reciprocal Rank Fusion (RRF)** merges the two lists. The two scores are on different
+   scales (cosine similarity vs BM25), so RRF uses only positions: each chunk gets
+   `1 / (k + rank)` from each list it appears in, with `k = REPOMIND_SEARCH_RRF_K` (60). A
+   chunk ranked well by both searches rises to the top. Chunks are matched by their id, so the
+   same lines in another repository or commit are never merged.
+5. **Limit** (only when reranking): only the top `REPOMIND_RERANK_MAX_CANDIDATES` (20) fused
+   chunks go to the reranker, which bounds the CPU time per request.
+6. **Rerank** (off by default; `"rerank": true` or `REPOMIND_RERANK_ENABLED=true`): a
+   cross-encoder model reads the question and each candidate together and scores how well
+   the chunk answers it. This is more accurate than comparing vectors in general, but too slow
+   for the whole repository, which is why it only sees the shortlist. Candidates beyond the
+   shortlist keep their fused order after the reranked ones.
+7. **Return** the top `top_k` with the usual path, line numbers and GitHub link.
+
+**How keyword search is stored.** No separate search service is needed. Each chunk's Qdrant
+point carries a second, "sparse" vector next to its embedding: a list of the chunk's terms
+(from its path, symbol and code) with BM25 weights. Qdrant keeps these in an inverted index
+and applies the "rare words count more" (IDF) part itself, so a keyword search only touches
+chunks that share a term with the question and nothing is loaded into memory per request.
+Tokenization is code-aware: `parseGitHubURL` and `hash_password` are kept whole (for exact
+lookups) and also split into `parse`/`git`/`hub`/`url` and `hash`/`password`; file names like
+`github_fetcher.py` are kept whole too. Common English question words ("how", "where",
+"the") are ignored, and a query uses at most 32 distinct terms. See
+`src/repomind/retrieval/keywords.py`.
+
+**Semantic mode** is exactly Phase 3's search (embed, nearest `top_k` chunks, cosine score)
+and is kept for backward compatibility and for comparing modes.
+
+### Upgrading from Phase 3
+
+Qdrant cannot add the keyword vector to a collection that already exists, so a collection
+created by Phase 3 (for example the `repomind_chunks` collection in the `qdrant_data` Docker
+volume, or `data/qdrant` in local mode) has no keyword index. RepoMind never deletes or
+rewrites it on its own. With such a collection:
+
+- `"mode": "semantic"` works exactly as before;
+- hybrid search (the default) returns semantic results only, with this entry in `warnings`:
+  "Keyword search is unavailable: this Qdrant collection was created before hybrid search
+  existed, so these results come from semantic search only. To enable keyword search, set
+  REPOMIND_QDRANT_COLLECTION to a new name and index the repository again.";
+- `/index` keeps working and stores chunks without keyword vectors.
+
+Safe upgrade, keeping the old data until you are happy with the new collection:
+
+1. Stop RepoMind (in Docker: `docker compose stop api`; Qdrant can keep running).
+2. In `.env`, set a new collection name: `REPOMIND_QDRANT_COLLECTION=repomind_chunks_v2`.
+3. Start RepoMind (`docker compose up -d api`). The new collection is created, with keyword
+   support, on the first `/index`.
+4. Call `POST /index` for every repository you want searchable. Each repository is embedded
+   again (once) into the new collection; the old collection is not read or changed.
+5. Check a search: `warnings` is `[]` and results carry `scores.keyword_rank` values.
+6. Only when you no longer need the old collection, delete it yourself, for example
+   `curl -X DELETE http://localhost:6333/collections/repomind_chunks` (server mode). In local
+   mode, either keep using a new collection name inside `data/qdrant`, or stop the app and
+   delete the `data/qdrant` folder before re-indexing. To roll back at any point, set
+   `REPOMIND_QDRANT_COLLECTION` back to the old name.
+
+### Reranking (off by default)
+
+Reranking is implemented but disabled by default. On the evaluation's realistic dataset
+(RepoMind's own code) the default reranker did not beat plain hybrid search: MRR 0.675 vs
+0.680 and Recall@1 0.526 vs 0.579. It did raise Recall@5 (0.816 vs 0.763), and it added about
+0.5 s per search on a 4-core CPU. To use it:
+
+- per request: send `"rerank": true` (hybrid mode), or
+- by default: set `REPOMIND_RERANK_ENABLED=true`; a request can still send `"rerank": false`.
+
+`REPOMIND_RERANK_MODEL` accepts a Hugging Face cross-encoder id or a local model folder. It
+uses the same device, cache folder and offline setting as the embedding model
+(`REPOMIND_EMBEDDING_DEVICE`, `REPOMIND_EMBEDDING_CACHE_DIR`,
+`REPOMIND_EMBEDDING_LOCAL_FILES_ONLY`). Models that need `trust_remote_code` are refused,
+because that would run Python code downloaded with the model. The model is not loaded until
+the first reranked search, and is then reused; if it cannot be downloaded or loaded, searches
+that rerank return 503 with a clear message, while searches that do not rerank keep working.
+
+Measured on a 4-core CPU, reranking 20 candidates of up to 512 tokens, with the retrieval
+evaluation's realistic dataset (RepoMind's own code, 19 judged questions):
+
+| Model | Size | Rerank 20 candidates | MRR (hybrid + rerank) | Notes |
+|---|---|---|---|---|
+| `cross-encoder/ms-marco-MiniLM-L6-v2` (default) | 23M params | ~0.5 s | 0.675 | Fast and small. Trained on web search, not code |
+| `mixedbread-ai/mxbai-rerank-xsmall-v1` | 71M params | ~3.2 s | 0.725 | Best quality here, about 6x slower |
+| `BAAI/bge-reranker-base` | 278M params | ~2.8 s | 0.714 | Larger download and memory |
+| `cross-encoder/ms-marco-MiniLM-L12-v2` | 33M params | not timed | 0.668 | No gain over L6 here |
+
+For comparison, hybrid without reranking scored 0.680 and semantic-only 0.574 on the same
+questions. With the default model, reranking did not improve MRR on the realistic dataset (it
+helped on the small synthetic one: 0.976 vs 0.914), which is why it is off by default. These numbers
+come from a small dataset and the larger models were picked using it, so treat them as a
+guide, not a benchmark.
 
 ### How indexing works
 
@@ -261,14 +439,48 @@ Embeddings run on the CPU by default (`REPOMIND_EMBEDDING_DEVICE=cpu`).
 
 ### Retrieval limitations
 
-- Semantic search only; keyword (hybrid) search and reranking come in Phase 4.
+- Keyword IDF (how rare a term is) is computed by Qdrant across the whole collection, i.e.
+  over every indexed repository, not per repository. Results are still filtered to one
+  repository; only the weighting of terms is shared.
+- Keyword term ids are 32-bit hashes, so two different terms can rarely share an id and add
+  a little noise to each other's scores.
+- The default reranker was trained on web search, not code. It is a modest help at best on
+  code questions (see the evaluation); a larger reranker is more accurate but slower on a CPU.
+- Reranker scores (logits) are not calibrated: a low score does not reliably mean "no
+  answer". Every search returns its top results even when nothing in the repository is
+  relevant.
 - `all-MiniLM-L6-v2` reads about the first 256 tokens of each chunk and ignores the rest,
-  so the end of a long chunk does not influence its vector.
+  so the end of a long chunk does not influence its vector (keyword search does see the
+  whole chunk; the reranker reads about the first 512 tokens).
 - MiniLM is a general English text model, not a code-specific one; it works best for
   questions phrased like the code's names and docstrings.
 - Indexing runs inside the request and on the CPU by default; large repositories take a while.
 - If indexing is interrupted after the new commit is stored but before old chunks are
   deleted, both versions can briefly appear in results; re-running `/index` fixes it.
+
+## Evaluation
+
+`tests/evaluation/` holds a small retrieval evaluation that compares semantic-only, hybrid
+(RRF) and hybrid + rerank search. Questions and their relevant code were written by reading
+the code before running any search. Two datasets:
+
+- **Synthetic shop + blog** (24 questions): a small invented `octo/shop` backend, plus
+  `octo/blog` indexed into the same collection with deliberately overlapping names, to check
+  repository isolation.
+- **RepoMind @ 5711c56** (21 questions): RepoMind's own code at the Phase 3 merge (about 320
+  chunks), read from this git repository, so it is realistic and repeatable.
+
+Questions cover exact function names, exact class/identifier names, conceptual questions,
+questions where keyword and semantic rankings disagree (error messages, file names, a name
+inside a sentence), repository isolation, and questions with no answer in the repository.
+Reported metrics: Recall@1/3/5, MRR (mean of 1 / rank of the first relevant result) and the
+rank of the first relevant result per question; isolation is checked on every question in
+every mode (results from another repository count as "leaks").
+
+`uv run pytest` runs the harness with deterministic fakes (it checks metrics and isolation,
+not which mode wins). The real-model numbers need the models downloaded:
+`uv run python -m tests.evaluation --real`. Latest results:
+[`docs/retrieval-evaluation.md`](docs/retrieval-evaluation.md).
 
 ## Configuration
 
@@ -296,7 +508,7 @@ its own and swapped (for example, a different LLM provider) without touching the
  Question ─► Embedder ─► Hybrid search (vector + keyword) ──┘
                               │
                               ▼
-                          Reranker ─► Context builder ─► LLM client ─► Answer + citations
+              Reranker (optional) ─► Context builder ─► LLM client ─► Answer + citations
 ```
 
 | Component | Responsibility | Phase |
@@ -307,10 +519,11 @@ its own and swapped (for example, a different LLM provider) without touching the
 | Chunker | Split files into chunks that keep path and line numbers | 2 ✅ |
 | Embedder | Sentence Transformers vectors for chunks and questions | 3 ✅ |
 | Vector store | Qdrant storage and nearest-neighbour search | 3 ✅ |
-| Hybrid search and reranker | Combine semantic and keyword matches, then reorder | 4 |
-| Context builder | Pick top chunks within a token budget, label them with citations | 4 |
-| LLM client | Provider-agnostic text generation | 4 |
-| API | FastAPI endpoints (`/health`, `/ingest`, `/index`, `/search`) | 1–3 ✅ |
+| Hybrid search | Keyword (BM25) search, fused with semantic search by RRF | 4 ✅ |
+| Reranker | Local cross-encoder reorders the best candidates (optional, off by default) | 4 ✅ |
+| Context builder | Pick top chunks within a token budget, label them with citations | later |
+| LLM client | Provider-agnostic text generation | later |
+| API | FastAPI endpoints (`/health`, `/ingest`, `/index`, `/search`) | 1–4 ✅ |
 
 ### Project layout
 
@@ -334,11 +547,15 @@ src/repomind/
   ingestion/service.py       Runs one ingestion and builds the summary
   ingestion/errors.py        Ingestion error types
   embeddings/sentence_transformer.py  Embedder: loads the model once, validates vectors
-  vectorstore/qdrant.py      VectorStore: collection setup, upsert, scoped search, cleanup
+  vectorstore/qdrant.py      VectorStore: collection setup, upsert, scoped semantic + keyword search
   retrieval/indexing.py      Ingest -> embed (only new chunks) -> store -> drop old commits
-  retrieval/search.py        Embed the question -> nearest chunks of one repository
-tests/                       Unit tests; GitHub, the model and Qdrant are faked or embedded
-tests/integration/           Real model + real Qdrant (opt-in, see above)
+  retrieval/keywords.py      Code-aware tokenizer and BM25 term weights (pure functions)
+  retrieval/fusion.py        Reciprocal Rank Fusion (pure function)
+  retrieval/search.py        The retrieval pipeline: semantic or hybrid (+ rerank)
+  reranking/cross_encoder.py Reranker: loads the cross-encoder once, validates its scores
+tests/                       Unit tests; GitHub, the models and Qdrant are faked or embedded
+tests/integration/           Real models + real Qdrant (opt-in, see above)
+tests/evaluation/            Retrieval evaluation dataset, metrics and report
 ```
 
 ## Security model

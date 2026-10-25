@@ -1,7 +1,7 @@
 # Local stack: the RepoMind API plus a Qdrant server.
 #   docker compose up --build
-# Data persists in named volumes: vectors in `qdrant_data`, the downloaded embedding model in
-# `model_cache` (so it is downloaded only once).
+# Data persists in named volumes: vectors in `qdrant_data`, the downloaded embedding and
+# reranking models in `model_cache` (so they are downloaded only once).
 services:
   api:
     build: .

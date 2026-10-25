@@ -1,12 +1,15 @@
-"""Small, deterministic stand-ins for the embedding model and the vector store."""
+"""Small, deterministic stand-ins for the embedding model, the vector store and the reranker."""
 
 import hashlib
 import math
 import re
 from collections.abc import Sequence
 
-from repomind.core.models import CodeChunk, RepoRef, ScoredChunk
+from repomind.core.models import CodeChunk, RepoRef, ScoredChunk, document_text
 from repomind.embeddings.errors import EmbeddingError
+from repomind.reranking.cross_encoder import order_by_scores
+from repomind.reranking.errors import RerankerError
+from repomind.retrieval.keywords import encode_document, encode_query, tokenize
 
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -54,11 +57,16 @@ class FakeEmbedder:
 
 
 class InMemoryVectorStore:
-    """A dictionary-backed VectorStore with the same scoping rules as the Qdrant store."""
+    """A dictionary-backed VectorStore with the same scoping rules as the Qdrant store.
 
-    def __init__(self) -> None:
+    Keyword search uses the same BM25 encoding and the same IDF formula as Qdrant's IDF
+    modifier, computed over every stored point."""
+
+    def __init__(self, keyword_search: bool = True) -> None:
         self.points: dict[str, tuple[CodeChunk, list[float], str]] = {}
         self.dimension: int | None = None
+        self.keywords_supported = keyword_search
+        self.keyword_queries = 0
 
     def ensure_collection(self, dimension: int) -> None:
         self.dimension = dimension
@@ -109,6 +117,67 @@ class InMemoryVectorStore:
         ]
         return sorted(scored, key=lambda s: s.score, reverse=True)[:limit]
 
+    def supports_keyword_search(self) -> bool:
+        return self.keywords_supported
+
+    def keyword_search(
+        self,
+        repo: RepoRef,
+        query: str,
+        limit: int,
+        commit_sha: str | None = None,
+    ) -> list[ScoredChunk]:
+        self.keyword_queries += 1
+        terms = encode_query(query)
+        documents = {
+            key: dict(zip(sparse.indices, sparse.values, strict=True))
+            for key, (chunk, _, _) in self.points.items()
+            for sparse in [encode_document(document_text(chunk))]
+        }
+        total = len(documents)
+        scored = []
+        for key, (chunk, _, _) in self.points.items():
+            if not _same_repo(chunk.repo, repo) or commit_sha not in (None, chunk.commit_sha):
+                continue
+            score = 0.0
+            for term in terms.indices:
+                if term in documents[key]:
+                    containing = sum(1 for d in documents.values() if term in d)
+                    idf = math.log(1 + (total - containing + 0.5) / (containing + 0.5))
+                    score += idf * documents[key][term]
+            if score > 0:
+                scored.append(ScoredChunk(chunk=chunk, score=score))
+        return sorted(scored, key=lambda s: s.score, reverse=True)[:limit]
+
 
 def _same_repo(a: RepoRef, b: RepoRef) -> bool:
     return a.full_name.lower() == b.full_name.lower()
+
+
+class FakeReranker:
+    """Scores each candidate by how many distinct query terms appear in it (ties keep order).
+
+    Deterministic and instant; stands in for the cross-encoder in unit tests."""
+
+    def __init__(self, model_name: str = "fake-reranker", max_candidates: int = 20) -> None:
+        self._model_name = model_name
+        self.max_candidates = max_candidates
+        self.calls: list[int] = []  # number of candidates per call
+        self.fail = False
+        self.scores_override: list[float] | None = None
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    def rerank(self, query: str, candidates: Sequence[ScoredChunk]) -> list[ScoredChunk]:
+        if len(candidates) > self.max_candidates:
+            raise ValueError("too many candidates")
+        self.calls.append(len(candidates))
+        if self.fail:
+            raise RerankerError("Could not load reranking model 'fake-reranker'")
+        terms = set(tokenize(query))
+        scores = self.scores_override or [
+            float(len(terms & set(tokenize(document_text(c.chunk))))) for c in candidates
+        ]
+        return order_by_scores(candidates, scores)
