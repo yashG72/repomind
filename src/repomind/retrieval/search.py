@@ -46,7 +46,7 @@ class SearchConfig(BaseModel, frozen=True):
     semantic_candidates: int = Field(default=50, ge=1)
     keyword_candidates: int = Field(default=50, ge=1)
     rrf_k: int = Field(default=DEFAULT_RRF_K, ge=1)
-    rerank_enabled: bool = True
+    rerank_enabled: bool = False  # the default for requests that do not choose
     rerank_max_candidates: int = Field(default=20, ge=1)
 
     @classmethod
@@ -189,10 +189,11 @@ class SearchService:
             if requested:
                 raise InvalidQuery("Reranking is only available in hybrid mode")
             return False
-        available = self._config.rerank_enabled and self._reranker is not None
-        if requested and not available:
-            raise InvalidQuery("Reranking is disabled on this server")
-        return available if requested is None else requested
+        if requested is None:
+            return self._config.rerank_enabled and self._reranker is not None
+        if requested and self._reranker is None:
+            raise InvalidQuery("Reranking is not available on this server")
+        return requested
 
     def _semantic(
         self,

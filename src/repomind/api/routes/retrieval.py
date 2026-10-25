@@ -25,7 +25,8 @@ class SearchRequest(BaseModel):
     commit_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     # Optional: "semantic" (Phase 3 behaviour) or "hybrid"; default REPOMIND_SEARCH_MODE.
     mode: SearchMode | None = None
-    # Optional, hybrid mode only: turn reranking on or off; default REPOMIND_RERANK_ENABLED.
+    # Optional, hybrid mode only: rerank this request or not; default REPOMIND_RERANK_ENABLED
+    # (off unless configured).
     rerank: bool | None = None
 
 

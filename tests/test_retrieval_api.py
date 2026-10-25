@@ -157,21 +157,53 @@ def test_secret_values_are_not_returned_or_stored(api: TestClient, store) -> Non
 # --- Phase 4: hybrid search and reranking ---------------------------------------------------
 
 
-def test_default_search_is_hybrid_and_reranked(api: TestClient, reranker: FakeReranker) -> None:
+def test_default_search_is_hybrid_without_reranking(
+    api: TestClient, reranker: FakeReranker
+) -> None:
     api.post("/index", json={"repo_url": URL})
 
     result = api.post("/search", json={"repo_url": URL, "query": "hash_password"}).json()
 
     assert result["mode"] == "hybrid"
-    assert result["reranker_model"] == "fake-reranker"
+    assert result["reranker_model"] is None
     assert result["warnings"] == []
+    assert reranker.calls == []
     top = result["results"][0]
     assert (top["path"], top["symbol"]) == ("auth/passwords.py", "def hash_password")
     assert top["scores"]["keyword_rank"] == 1
-    assert top["scores"]["rerank"] == top["score"]
+    assert top["scores"]["rerank"] is None
+    assert top["score"] == top["scores"]["rrf"]
     # Phase 3 fields and citation format are unchanged.
-    assert set(top) >= {"score", "path", "start_line", "end_line", "symbol", "language"}
-    assert top["url"].endswith(f"#L{top['start_line']}-L{top['end_line']}")
+    assert set(top) >= {
+        "score",
+        "path",
+        "start_line",
+        "end_line",
+        "symbol",
+        "language",
+        "commit_sha",
+        "url",
+        "text",
+    }
+    assert top["commit_sha"] == SHA
+    assert top["url"] == (
+        f"https://github.com/octo/demo/blob/{SHA}/auth/passwords.py"
+        f"#L{top['start_line']}-L{top['end_line']}"
+    )
+    assert "def hash_password(password):" in top["text"]
+
+
+def test_rerank_can_be_requested(api: TestClient, reranker: FakeReranker) -> None:
+    api.post("/index", json={"repo_url": URL})
+
+    result = api.post(
+        "/search", json={"repo_url": URL, "query": "hash_password", "rerank": True}
+    ).json()
+
+    assert result["mode"] == "hybrid" and result["reranker_model"] == "fake-reranker"
+    top = result["results"][0]
+    assert top["symbol"] == "def hash_password"
+    assert top["scores"]["rerank"] == top["score"]
     assert len(reranker.calls) == 1 and 5 <= reranker.calls[0] <= 20  # bounded candidate set
 
 
@@ -218,20 +250,21 @@ def test_reranker_failure_is_503_without_internals(api: TestClient, reranker: Fa
     api.post("/index", json={"repo_url": URL})
     reranker.fail = True
 
-    response = api.post("/search", json={"repo_url": URL, "query": "password"})
+    response = api.post("/search", json={"repo_url": URL, "query": "password", "rerank": True})
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Could not load reranking model 'fake-reranker'"}
     assert "Traceback" not in response.text
-    # Semantic mode does not need the reranker and keeps working.
-    ok = api.post("/search", json={"repo_url": URL, "query": "password", "mode": "semantic"})
-    assert ok.status_code == 200
+    # Searches that do not rerank do not need the model and keep working.
+    for body in ({}, {"mode": "semantic"}, {"rerank": False}):
+        ok = api.post("/search", json={"repo_url": URL, "query": "password", **body})
+        assert ok.status_code == 200
 
 
-def test_rerank_disabled_by_settings(
+def test_rerank_enabled_by_settings(
     settings: Settings, embedder, store, reranker: FakeReranker
 ) -> None:
-    app = create_app(settings.model_copy(update={"rerank_enabled": False}))
+    app = create_app(settings.model_copy(update={"rerank_enabled": True}))
     fake = FakeGitHub(files=dict(SAMPLE_FILES))
     app.dependency_overrides[get_ingestion_service] = lambda: IngestionService(
         GitHubFetcher(settings, DefaultFileFilter(10_000), transport=fake.transport()),
@@ -244,11 +277,11 @@ def test_rerank_disabled_by_settings(
     client.post("/index", json={"repo_url": URL})
 
     default = client.post("/search", json={"repo_url": URL, "query": "password"})
-    forced = client.post("/search", json={"repo_url": URL, "query": "password", "rerank": True})
+    off = client.post("/search", json={"repo_url": URL, "query": "password", "rerank": False})
 
-    assert default.status_code == 200 and default.json()["reranker_model"] is None
-    assert forced.status_code == 422 and "disabled" in forced.json()["detail"]
-    assert reranker.calls == []
+    assert default.status_code == 200 and default.json()["reranker_model"] == "fake-reranker"
+    assert off.status_code == 200 and off.json()["reranker_model"] is None
+    assert len(reranker.calls) == 1
 
 
 def test_phase3_collection_still_searches_with_a_warning(

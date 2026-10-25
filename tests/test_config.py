@@ -57,7 +57,7 @@ def test_retrieval_settings_defaults_and_validation() -> None:
     settings = Settings(_env_file=None)
     assert settings.search_mode == "hybrid"
     assert settings.search_rrf_k == 60
-    assert settings.rerank_enabled is True
+    assert settings.rerank_enabled is False  # off by default; see the README's evaluation
     assert settings.rerank_max_candidates == 20
 
     for bad in (

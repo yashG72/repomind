@@ -27,6 +27,10 @@ the README's Evaluation section and in `tests/evaluation/`.
 - **Isolation.** No results from another repository in any mode, on any question (0 leaks).
 - **No-match questions** still return top results (search has no relevance threshold), and
   reranker scores are not calibrated enough to detect "no answer".
+- **Consequence for the defaults:** hybrid search stays the default mode, and reranking is
+  off by default (`REPOMIND_RERANK_ENABLED=false`); it can be turned on per request with
+  `"rerank": true` or by default with `REPOMIND_RERANK_ENABLED=true`. The numbers above are
+  unchanged by that switch: each mode is evaluated with reranking set explicitly.
 - Both datasets are small (21 and 19 judged questions); one question moving changes MRR by
   about 0.03-0.05. The larger reranker models were compared on this same dataset.
 

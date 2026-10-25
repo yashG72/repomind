@@ -101,7 +101,7 @@ def test_hybrid_pipeline_with_real_models(tmp_path, reranker) -> None:
 
         search = SearchService(embedder, store, reranker)
         for question, (path, symbol) in QUESTIONS.items():
-            response = search.search("https://github.com/octo/demo", question, top_k=3)
+            response = search.search("https://github.com/octo/demo", question, top_k=3, rerank=True)
             assert response.reranker_model == RERANK_MODEL
             assert all(h.url.startswith("https://github.com/octo/demo/") for h in response.results)
             top = response.results[0]

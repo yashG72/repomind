@@ -134,7 +134,9 @@ def test_reranker_reorders_only_the_top_candidates() -> None:
     # Reverse the order of the 3 candidates the reranker sees.
     reranker.scores_override = [1.0, 2.0, 3.0]
 
-    response = service(store, reranker, rerank_max_candidates=3).search(URL, "q", top_k=5)
+    response = service(store, reranker, rerank_max_candidates=3).search(
+        URL, "q", top_k=5, rerank=True
+    )
 
     assert reranker.calls == [3]
     assert [h.path for h in response.results] == ["s2.py", "s1.py", "s0.py", "s3.py", "s4.py"]
@@ -148,20 +150,35 @@ def test_rerank_can_be_turned_off_per_request() -> None:
     store = ScriptedStore(scored((A, 0.9)), [])
     reranker = FakeReranker()
 
-    response = service(store, reranker).search(URL, "q", top_k=5, rerank=False)
+    search = service(store, reranker, rerank_enabled=True)
+    response = search.search(URL, "q", top_k=5, rerank=False)
 
     assert reranker.calls == [] and response.reranker_model is None
 
 
-def test_rerank_disabled_in_settings_is_skipped_or_refused() -> None:
+def test_rerank_is_off_by_default_and_can_be_requested() -> None:
     store = ScriptedStore(scored((A, 0.9)), [])
     reranker = FakeReranker()
-    search = service(store, reranker, rerank_enabled=False)
+    search = service(store, reranker)
 
     assert search.search(URL, "q", top_k=5).reranker_model is None
-    with pytest.raises(InvalidQuery, match="disabled"):
-        search.search(URL, "q", top_k=5, rerank=True)
     assert reranker.calls == []
+    assert search.search(URL, "q", top_k=5, rerank=True).reranker_model == "fake-reranker"
+    assert reranker.calls == [1]
+
+
+def test_rerank_enabled_in_config_is_the_default() -> None:
+    store = ScriptedStore(scored((A, 0.9)), [])
+    reranker = FakeReranker()
+
+    response = service(store, reranker, rerank_enabled=True).search(URL, "q", top_k=5)
+
+    assert response.reranker_model == "fake-reranker" and reranker.calls == [1]
+
+
+def test_rerank_requested_without_a_reranker_is_refused() -> None:
+    with pytest.raises(InvalidQuery, match="not available"):
+        service(ScriptedStore([], [])).search(URL, "q", top_k=5, rerank=True)
 
 
 def test_rerank_in_semantic_mode_is_refused() -> None:
@@ -212,7 +229,7 @@ def test_reranker_returning_different_results_is_an_error() -> None:
     store = ScriptedStore(scored((A, 0.9), (B, 0.8)), [])
 
     with pytest.raises(RerankerError, match="different set"):
-        service(store, Dropping()).search(URL, "q", top_k=5)
+        service(store, Dropping()).search(URL, "q", top_k=5, rerank=True)
 
 
 def test_reranker_failure_propagates() -> None:
@@ -220,13 +237,15 @@ def test_reranker_failure_propagates() -> None:
     reranker.fail = True
 
     with pytest.raises(RerankerError):
-        service(ScriptedStore(scored((A, 0.9)), []), reranker).search(URL, "q", top_k=5)
+        service(ScriptedStore(scored((A, 0.9)), []), reranker).search(
+            URL, "q", top_k=5, rerank=True
+        )
 
 
 def test_nothing_found_skips_the_reranker() -> None:
     reranker = FakeReranker()
 
-    response = service(ScriptedStore([], []), reranker).search(URL, "q", top_k=5)
+    response = service(ScriptedStore([], []), reranker).search(URL, "q", top_k=5, rerank=True)
 
     assert response.results == [] and reranker.calls == []
 
@@ -254,7 +273,7 @@ def test_query_text_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
     store = ScriptedStore(scored((A, 0.9)), scored((A, 1.0)))
 
     with caplog.at_level("INFO"):
-        service(store, FakeReranker()).search(URL, "secret question text", top_k=5)
+        service(store, FakeReranker()).search(URL, "secret question text", top_k=5, rerank=True)
 
     record = next(r for r in caplog.records if r.getMessage() == "search completed")
     assert "secret question text" not in str(record.__dict__)
