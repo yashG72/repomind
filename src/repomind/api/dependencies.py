@@ -1,9 +1,10 @@
 """Builds pipeline components for each request. Tests replace these with FastAPI's
 dependency_overrides, for example to inject a fake GitHub or a fake embedder.
 
-The embedder, reranker and vector store are expensive (loaded models, an open database), so
-they are created once per app in `create_app` and shared via `app.state`. Everything else is
-cheap and created per request, so no repository data outlives a request.
+The embedder, reranker, vector store and LLM client are expensive (loaded models, an open
+database, an HTTP connection pool), so they are created once per app in `create_app` and
+shared via `app.state`. Everything else is cheap and created per request, so no repository
+data outlives a request.
 """
 
 from typing import Annotated
@@ -11,7 +12,9 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from repomind.config import Settings, get_settings
-from repomind.core.interfaces import Embedder, Reranker, VectorStore
+from repomind.core.interfaces import Embedder, LLMClient, Reranker, VectorStore
+from repomind.generation.answer import AnswerService
+from repomind.generation.context import ContextBuilder
 from repomind.ingestion.chunking import CodeChunker
 from repomind.ingestion.file_filter import DefaultFileFilter
 from repomind.ingestion.github_fetcher import GitHubFetcher
@@ -32,6 +35,11 @@ def get_vector_store(request: Request) -> VectorStore:
 
 def get_reranker(request: Request) -> Reranker:
     return request.app.state.reranker
+
+
+def get_llm_client(request: Request) -> LLMClient | None:
+    """None when no LLM provider is configured; POST /ask then answers 503."""
+    return request.app.state.llm_client
 
 
 def get_ingestion_service(settings: SettingsDep) -> IngestionService:
@@ -58,3 +66,16 @@ def get_search_service(
     reranker: Annotated[Reranker, Depends(get_reranker)],
 ) -> SearchService:
     return SearchService(embedder, store, reranker, SearchConfig.from_settings(settings))
+
+
+def get_answer_service(
+    settings: SettingsDep,
+    search: Annotated[SearchService, Depends(get_search_service)],
+    llm: Annotated[LLMClient | None, Depends(get_llm_client)],
+) -> AnswerService:
+    return AnswerService(
+        search,
+        llm,
+        ContextBuilder(settings.ask_max_context_chunks, settings.ask_max_context_chars),
+        max_question_chars=settings.ask_max_question_chars,
+    )

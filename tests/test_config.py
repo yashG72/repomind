@@ -69,3 +69,24 @@ def test_retrieval_settings_defaults_and_validation() -> None:
     ):
         with pytest.raises(ValidationError):
             Settings(_env_file=None, **bad)
+
+
+def test_answer_settings_defaults_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(_env_file=None)
+    assert settings.llm_provider == "none"  # /ask is off until a provider is configured
+    assert settings.llm_model == "claude-opus-5-5"
+    assert settings.ask_max_context_chars == 24_000
+
+    monkeypatch.setenv("REPOMIND_LLM_MODEL", "")  # as in older .env files
+    assert Settings(_env_file=None).llm_model == "claude-opus-5-5"
+
+    for bad in (
+        {"llm_provider": "openai"},
+        {"llm_timeout_seconds": 0},
+        {"llm_effort": "extreme"},
+        {"ask_max_context_chunks": 0},
+        {"ask_max_context_chars": 10},
+        {"ask_default_top_k": 21},
+    ):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, **bad)

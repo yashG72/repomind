@@ -10,6 +10,16 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
 from repomind.embeddings.errors import EmbeddingError
+from repomind.generation.errors import (
+    LLMAuthenticationError,
+    LLMError,
+    LLMNotConfigured,
+    LLMRateLimited,
+    LLMRefused,
+    LLMTimeout,
+    LLMUnavailable,
+    MalformedLLMOutput,
+)
 from repomind.ingestion.errors import (
     GitHubUnavailable,
     IngestionError,
@@ -38,6 +48,15 @@ _STATUS_BY_ERROR: list[tuple[type[Exception], int]] = [
     (RerankerError, status.HTTP_503_SERVICE_UNAVAILABLE),
     (CollectionMismatch, status.HTTP_500_INTERNAL_SERVER_ERROR),
     (VectorStoreError, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (LLMNotConfigured, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (LLMRateLimited, status.HTTP_429_TOO_MANY_REQUESTS),
+    (LLMTimeout, status.HTTP_504_GATEWAY_TIMEOUT),
+    (LLMUnavailable, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (LLMRefused, status.HTTP_422_UNPROCESSABLE_CONTENT),
+    # Our credentials or model were rejected, or the model replied in the wrong format.
+    (LLMAuthenticationError, status.HTTP_502_BAD_GATEWAY),
+    (MalformedLLMOutput, status.HTTP_502_BAD_GATEWAY),
+    (LLMError, status.HTTP_502_BAD_GATEWAY),
 ]
 
 

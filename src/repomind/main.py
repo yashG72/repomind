@@ -10,9 +10,11 @@ from fastapi import FastAPI, Request, Response
 
 from repomind import __version__
 from repomind.api.errors import register_exception_handlers
-from repomind.api.routes import health, ingest, retrieval
+from repomind.api.routes import ask, health, ingest, retrieval
 from repomind.config import Settings, get_settings
+from repomind.core.interfaces import LLMClient
 from repomind.embeddings.sentence_transformer import SentenceTransformerEmbedder
+from repomind.generation.anthropic_client import AnthropicLLMClient
 from repomind.logging_config import configure_logging
 from repomind.reranking.cross_encoder import CrossEncoderReranker
 from repomind.vectorstore.qdrant import QdrantVectorStore
@@ -50,6 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         local_files_only=settings.embedding_local_files_only,
     )
     app.state.vector_store = vector_store
+    app.state.llm_client = _llm_client(settings)
     register_exception_handlers(app)
 
     @app.middleware("http")
@@ -87,7 +90,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(ingest.router)
     app.include_router(retrieval.router)
+    app.include_router(ask.router)
     return app
+
+
+def _llm_client(settings: Settings) -> LLMClient | None:
+    """The configured answer provider, or None (POST /ask then answers 503). Creating it makes
+    no network call; the SDK client is created on the first question."""
+    if settings.llm_provider == "none":
+        return None
+    if settings.llm_api_key is None:
+        logger.warning("REPOMIND_LLM_PROVIDER is set but REPOMIND_LLM_API_KEY is not; /ask is off")
+        return None
+    return AnthropicLLMClient.from_settings(settings)
 
 
 app = create_app()

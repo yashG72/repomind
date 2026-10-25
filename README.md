@@ -4,13 +4,14 @@ RepoMind lets you point at a public GitHub repository, index its source files, a
 natural-language questions about how it works. Every answer is grounded in retrieved source
 code and cites the files and line numbers it came from.
 
-> **Status: Phase 4 (hybrid retrieval).** RepoMind can fetch a public GitHub repository,
+> **Status: Phase 5 (grounded answers).** RepoMind can fetch a public GitHub repository,
 > split it into line-numbered chunks, embed them with Sentence Transformers, store them in
 > Qdrant, and return the chunks most relevant to a question. Search combines semantic
 > (meaning-based) and keyword (exact-name) retrieval and merges them with Reciprocal Rank
 > Fusion. Reranking the best candidates with a local cross-encoder model is available but off
-> by default (see [Reranking](#reranking-off-by-default)). LLM-written answers arrive in a
-> later phase.
+> by default (see [Reranking](#reranking-off-by-default)). `POST /ask` writes an answer with
+> Claude from the retrieved code and cites the exact files and lines it used (see
+> [Asking questions](#asking-questions)).
 
 ## Quick start
 
@@ -39,14 +40,16 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-Integration tests use the real models and a real Qdrant server. Each part is skipped unless
-you point it at the real thing:
+Integration tests use the real models, a real Qdrant server and the real Anthropic API. Each
+part is skipped unless you point it at the real thing (the Anthropic tests make paid API
+calls, so they run only when `REPOMIND_TEST_LLM_API_KEY` is set):
 
 ```bash
 docker compose up -d qdrant
 REPOMIND_TEST_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2 \
 REPOMIND_TEST_RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L6-v2 \
 REPOMIND_TEST_QDRANT_URL=http://localhost:6333 \
+REPOMIND_TEST_LLM_API_KEY=sk-ant-... \
 uv run pytest -m integration
 ```
 
@@ -458,6 +461,180 @@ Embeddings run on the CPU by default (`REPOMIND_EMBEDDING_DEVICE=cpu`).
 - If indexing is interrupted after the new commit is stored but before old chunks are
   deleted, both versions can briefly appear in results; re-running `/index` fixes it.
 
+## Asking questions
+
+`POST /ask` answers a question about an indexed repository. It runs the same search as
+`POST /search`, gives the best chunks to an LLM (Claude) as numbered excerpts, and returns
+the answer with citations. Index the repository first; asking about one that is not indexed
+returns 404.
+
+### Configuring the LLM provider
+
+`/ask` is off until a provider is configured; until then it answers 503. Phase 5 supports one
+provider, Anthropic, through the official `anthropic` Python SDK. Create an API key in the
+[Claude Console](https://platform.claude.com/) and add it to `.env` (never commit it):
+
+```bash
+REPOMIND_LLM_PROVIDER=anthropic
+REPOMIND_LLM_API_KEY=sk-ant-...        # your key; it is never logged or returned
+REPOMIND_LLM_MODEL=claude-opus-5-5     # optional; any Claude model id
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `REPOMIND_LLM_PROVIDER` | `none` | `none` (`/ask` off) or `anthropic` |
+| `REPOMIND_LLM_API_KEY` | unset | Anthropic API key |
+| `REPOMIND_LLM_MODEL` | `claude-opus-5-5` | Model id |
+| `REPOMIND_LLM_TIMEOUT_SECONDS` | `120` | Timeout per attempt |
+| `REPOMIND_LLM_MAX_RETRIES` | `2` | Retries on timeouts, 429 and 5xx, with backoff |
+| `REPOMIND_LLM_MAX_OUTPUT_TOKENS` | `16000` | Cap on generated tokens (thinking included) |
+| `REPOMIND_LLM_EFFORT` | `medium` | `low` to `max`: how much the model thinks; more is slower and costs more |
+| `REPOMIND_LLM_REFUSAL_FALLBACK` | `true` | If the model's safety classifiers decline a request, Anthropic re-runs it on its recommended fallback model. Set `false` for models without server-side fallback (for example Haiku) |
+| `REPOMIND_ASK_DEFAULT_TOP_K` | `8` | Search results considered when a request has no `top_k` |
+| `REPOMIND_ASK_MAX_CONTEXT_CHUNKS` | `10` | At most this many excerpts are sent to the model |
+| `REPOMIND_ASK_MAX_CONTEXT_CHARS` | `24000` | At most this many characters of code are sent |
+| `REPOMIND_ASK_MAX_QUESTION_CHARS` | `2000` | Longest accepted question |
+
+The context limits trade answer quality against cost and latency. Chunks are at most 6,000
+characters and usually far smaller, so the default of 24,000 characters (roughly 6,000 to
+8,000 tokens of code) normally holds all 8 default results. Raising the limits gives the
+model more code to work from, at the price of more input tokens per question.
+
+### Request and response
+
+```bash
+curl -X POST http://127.0.0.1:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"repo_url": "https://github.com/octo/demo", "question": "Where are user passwords hashed?"}'
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `repo_url` | yes | `https://github.com/<owner>/<repo>`, already indexed |
+| `question` | yes | 1 to 2,000 characters (`REPOMIND_ASK_MAX_QUESTION_CHARS`) |
+| `top_k` | no | Search results to consider, 1 to 20 (default 8) |
+| `commit_sha` | no | Answer from one indexed commit (40 hex characters) |
+| `mode` | no | `hybrid` or `semantic`, as in `/search` |
+| `rerank` | no | Rerank this request (hybrid mode), as in `/search` |
+
+Example response (abridged). The shape, citation and evidence metadata come from a run over
+the test repository; the answer text, model names and timings are illustrative:
+
+```json
+{
+  "repository": "octo/demo",
+  "question": "Where are user passwords hashed?",
+  "answer": "Passwords are hashed by `hash_password`, which generates a random 16-byte salt and runs PBKDF2-HMAC-SHA256 with 200,000 iterations [S1]. ...",
+  "insufficient_evidence": false,
+  "citations": [
+    {
+      "id": "S1",
+      "repository": "octo/demo",
+      "path": "auth/passwords.py",
+      "start_line": 5,
+      "end_line": 8,
+      "commit_sha": "0123456789abcdef0123456789abcdef01234567",
+      "url": "https://github.com/octo/demo/blob/0123456789abcdef0123456789abcdef01234567/auth/passwords.py#L5-L8",
+      "symbol": "def hash_password"
+    }
+  ],
+  "evidence": [
+    {"id": "S1", "path": "auth/passwords.py", "start_line": 5, "end_line": 8, "symbol": "def hash_password", "language": "python", "commit_sha": "0123456...", "url": "...", "score": 0.032787, "cited": true},
+    {"id": "S2", "path": "auth/passwords.py", "start_line": 1, "end_line": 2, "...": "...", "cited": false}
+  ],
+  "retrieval": {
+    "mode": "hybrid",
+    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "reranker_model": null,
+    "results_retrieved": 3,
+    "evidence_used": 3,
+    "duplicates_dropped": 0,
+    "dropped_over_budget": 0,
+    "context_chars": 272,
+    "search_duration_ms": 4.15
+  },
+  "llm_model": "claude-opus-5-5",
+  "warnings": [],
+  "duration_ms": 2950.4
+}
+```
+
+- `answer` is Markdown with inline citation markers such as `[S1]`.
+- `citations` are the excerpts the answer cites, in order of first mention.
+- `evidence` lists every excerpt the model was given (without the code) and whether it was
+  cited, so you can see what the answer was based on.
+- `retrieval` describes the search: its mode, how many results it returned, how many became
+  excerpts, and how many were dropped as duplicates or for not fitting the context limit.
+- `warnings` explains anything that changed the result, such as removed citations, evidence
+  left out, or keyword search being unavailable in an older collection.
+
+### How citations work
+
+1. Search returns chunks of the repository, each with its path, line range, commit and
+   GitHub URL.
+2. The context builder numbers them `S1`, `S2`, ... in rank order. It drops chunks that repeat
+   another chunk's lines or code, and stops at the context limits. A chunk is never cut: one
+   that does not fit is left out whole, so every excerpt's line range matches its text.
+3. The model receives only those excerpts and must reply with JSON: the answer, the ids it
+   cited and whether the evidence was insufficient. Structured outputs keep the reply in that
+   format.
+4. RepoMind checks every id. Ids that were not given to the model are removed from the answer
+   and reported in `warnings`. The remaining ids are resolved to the stored retrieval
+   metadata, so paths, line numbers, commits and URLs never come from the model's own text.
+
+### When the evidence is insufficient
+
+`insufficient_evidence` is `true` when:
+
+- the model says the excerpts do not answer the question (it explains what is missing and may
+  cite the partial evidence it found);
+- the model's answer cites no valid excerpt at all; the answer is then withheld and replaced
+  with a short explanation, rather than being presented as grounded; or
+- no retrieved chunk could be used (for example, every chunk was larger than the context
+  limit); the model is not called and `llm_model` is `null`.
+
+A "not found" answer means the retrieved code did not show it, not that the repository
+certainly lacks it.
+
+### Prompt injection
+
+Repository content is untrusted. Excerpts are sent only as data inside tags whose name is
+random for every request, so code cannot close them early, and the system prompt tells the
+model to ignore instructions found inside them. The model has no tools and cannot run code or
+fetch anything. Because no prompt can guarantee this, the application also validates every
+citation (above), so injected text cannot produce citations to code that was not retrieved.
+
+### Errors
+
+| Status | When |
+|---|---|
+| 404 | The repository (or the requested commit) has not been indexed |
+| 422 | Invalid URL, blank or too long question, invalid options, or the provider declined to answer |
+| 429 | The provider is rate limiting requests |
+| 502 | The provider rejected the API key or model, rejected the request, or replied in the wrong format |
+| 503 | No provider is configured, or the provider is unavailable |
+| 504 | The provider did not answer within the timeout |
+
+Error responses are short messages; they never include the prompt, retrieved code, the API key
+or the provider's response.
+
+### Answer limitations
+
+- **Latency.** Each question runs a search and then one model call, which usually takes
+  several seconds, and longer at higher effort settings or with larger contexts.
+- **Cost.** Every question sends the excerpts to Anthropic's API and is billed per token; the
+  context limits above bound the input size. See Anthropic's pricing for the chosen model.
+- **Grounding is checked, not guaranteed.** Citations are validated, so they always point at
+  code the model was given, but RepoMind cannot verify that every sentence of an answer is
+  supported by the code it cites. Read the cited lines for anything important.
+- **Only retrieved code is seen.** Questions whose answer is spread across many files, or
+  needs code that search does not rank highly, may get partial or insufficient answers.
+  Rephrasing with names from the code, or raising `top_k` and the context limits, can help.
+- **One repository at a time**, one question per request, no conversation history and no
+  streaming.
+- Excerpts and questions are sent to Anthropic, a third party; do not ask about code you are
+  not allowed to share with it.
+
 ## Evaluation
 
 `tests/evaluation/` holds a small retrieval evaluation that compares semantic-only, hybrid
@@ -521,9 +698,10 @@ its own and swapped (for example, a different LLM provider) without touching the
 | Vector store | Qdrant storage and nearest-neighbour search | 3 ✅ |
 | Hybrid search | Keyword (BM25) search, fused with semantic search by RRF | 4 ✅ |
 | Reranker | Local cross-encoder reorders the best candidates (optional, off by default) | 4 ✅ |
-| Context builder | Pick top chunks within a token budget, label them with citations | later |
-| LLM client | Provider-agnostic text generation | later |
-| API | FastAPI endpoints (`/health`, `/ingest`, `/index`, `/search`) | 1–4 ✅ |
+| Context builder | Pick top chunks within a size budget, label them with citation ids | 5 ✅ |
+| LLM client | Text generation behind an interface (Anthropic implementation) | 5 ✅ |
+| Answer service | Retrieve, build context, generate, validate citations | 5 ✅ |
+| API | FastAPI endpoints (`/health`, `/ingest`, `/index`, `/search`, `/ask`) | 1–5 ✅ |
 
 ### Project layout
 
@@ -537,6 +715,7 @@ src/repomind/
   api/routes/health.py       GET /health
   api/routes/ingest.py       POST /ingest
   api/routes/retrieval.py    POST /index, POST /search
+  api/routes/ask.py          POST /ask
   core/models.py             Shared data types (RepoRef, SourceFile, CodeChunk, ...)
   core/interfaces.py         Protocols for each pipeline component
   ingestion/github_url.py    Strict GitHub URL parser
@@ -553,8 +732,13 @@ src/repomind/
   retrieval/fusion.py        Reciprocal Rank Fusion (pure function)
   retrieval/search.py        The retrieval pipeline: semantic or hybrid (+ rerank)
   reranking/cross_encoder.py Reranker: loads the cross-encoder once, validates its scores
+  generation/context.py      Evidence context: numbered excerpts within size limits
+  generation/prompts.py      System prompt, excerpt formatting and the answer JSON schema
+  generation/anthropic_client.py  LLM client for Claude: timeouts, retries, safe errors
+  generation/answer.py       The /ask pipeline and citation validation
+  generation/errors.py       Answer generation error types
 tests/                       Unit tests; GitHub, the models and Qdrant are faked or embedded
-tests/integration/           Real models + real Qdrant (opt-in, see above)
+tests/integration/           Real models, Qdrant and Anthropic API (opt-in, see above)
 tests/evaluation/            Retrieval evaluation dataset, metrics and report
 ```
 
@@ -570,10 +754,13 @@ tests/evaluation/            Retrieval evaluation dataset, metrics and report
 - **Repository content is untrusted.** Archives are read in memory and never extracted to
   disk, so a hostile archive cannot overwrite files. Paths with `..`, absolute paths and
   links are skipped. Python files are parsed with `ast`, which reads code without running it.
-  Later phases also treat content as untrusted when placing it in LLM prompts.
+  Retrieved code is sent to the LLM only as data, never as instructions, and the model has
+  no tools (see [Prompt injection](#prompt-injection)).
 - **Limits.** Per-file size, total uncompressed size, compressed download size, archive entry
   count and file count are all capped. The repository size reported by GitHub is checked
   before downloading.
 - **Secrets.** No keys in code; `.env` is excluded from git and Docker images. The optional
-  GitHub token is sent only to `api.github.com`, never logged, and never included in error
-  messages. Secret-looking files are skipped and tokens inside source files are redacted.
+  GitHub token is sent only to `api.github.com`, and the Anthropic API key only to Anthropic's
+  API; neither is logged or included in error messages. Questions, prompts and retrieved code
+  are not logged either (only their sizes), and the Anthropic SDK's request logging is
+  turned off. Secret-looking files are skipped and tokens inside source files are redacted.
